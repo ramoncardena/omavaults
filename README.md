@@ -269,6 +269,10 @@ mkdir -p /tmp/qslint && ln -sfn "${OMARCHY_PATH:-/usr/share/omarchy}/shell" /tmp
 qmllint -I /tmp/qslint BarWidget.qml Panel.qml
 ```
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 [MIT](LICENSE)
