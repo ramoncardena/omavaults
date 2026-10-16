@@ -225,6 +225,10 @@ BarWidget {
       root.busyVault = ""
       if (exitCode === 0 && result && result.ok) {
         root.statusMessage = action === "fetch" ? "" : (result.message || "")
+        // Conflict copies need the user; say so even if the panel is closed.
+        if (result.conflicts > 0)
+          Quickshell.execDetached(["omarchy-notification-send", "-g", "󰈢", "omaVaults: notes edited on two devices",
+            "Kept your version beside the synced one: " + result.conflictCopies.join(", ") + ". Merge them, then delete the copy."])
         if (action === "open") root.close()
         if (action === "create" || action === "import") Qt.callLater(function() { root.openVault(vault) })
       } else if (result && result.needsRestart) {

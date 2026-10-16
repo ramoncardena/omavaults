@@ -11,6 +11,7 @@ function stateGlyph(state) {
     case "behind": return "󰁅"
     case "diverged": return "󰃻"
     case "conflict": return "󰀦"
+    case "copies": return "󰈢"
     case "unpublished": return "󰅤"
     default: return "󰘥"
   }
@@ -27,6 +28,13 @@ function size(kb) {
 }
 
 function stateText(v) {
+  var copies = Number(v.conflictCopies) || 0
+  var base = baseStateText(v)
+  if (copies > 0 && v.state !== "copies") base += " · " + plural(copies, "conflict copy", "conflict copies")
+  return base
+}
+
+function baseStateText(v) {
   switch (v.state) {
     case "synced": return "Up to date"
     case "modified": return plural(v.dirty, "local change", "local changes")
@@ -34,6 +42,7 @@ function stateText(v) {
     case "behind": return plural(v.behind, "update available", "updates available")
     case "diverged": return "Local and remote changes — sync to merge"
     case "conflict": return "Conflict — resolve in the repo"
+    case "copies": return plural(Number(v.conflictCopies) || 0, "conflict copy", "conflict copies") + " to merge"
     case "unpublished": return "Not on the remote yet"
     default: return String(v.state || "")
   }
@@ -47,7 +56,7 @@ function stateTone(state) {
 }
 
 function isTrouble(state) {
-  return state === "conflict" || state === "diverged"
+  return state === "conflict" || state === "diverged" || state === "copies"
 }
 
 function relativeTime(epochSec, nowMs) {

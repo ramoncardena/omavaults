@@ -119,7 +119,7 @@ cmd_status() {
     read -r ahead behind < <(git -C "$dir" rev-list --left-right --count 'HEAD...@{u}' 2>/dev/null || echo "0 0")
   fi
 
-  local vaults_json="[]" name path dirty v_ahead v_behind conflicts state last_commit
+  local vaults_json="[]" name path dirty v_ahead v_behind conflicts state last_commit copies
   while IFS= read -r -d '' path; do
     name=$(basename "$path")
     dirty=$(git -C "$dir" status --porcelain --untracked-files=all -- "$name" 2>/dev/null | wc -l)
@@ -131,6 +131,7 @@ cmd_status() {
       v_behind=$(git -C "$dir" rev-list --count 'HEAD..@{u}' -- "$name" 2>/dev/null || echo 0)
     fi
     last_commit=$(git -C "$dir" log -1 --format=%ct -- "$name" 2>/dev/null || echo "")
+    copies=$(find "$path" -path "$path/.git" -prune -o -type f -name '* (conflict *)*' -print 2>/dev/null | wc -l)
 
     if (( conflicts > 0 )) || $rebasing; then state="conflict"
     elif (( v_ahead > 0 && v_behind > 0 )) || (( dirty > 0 && v_behind > 0 )); then state="diverged"
@@ -140,12 +141,14 @@ cmd_status() {
     elif ! $upstream; then state="unpublished"
     else state="synced"
     fi
+    # Conflict copies need a human; flag a vault that is otherwise clean.
+    (( copies > 0 )) && [[ $state == synced || $state == unpublished ]] && state="copies"
 
     vaults_json=$(jq -c \
       --arg name "$name" --arg path "$path" --arg state "$state" \
       --argjson dirty "$dirty" --argjson ahead "$v_ahead" --argjson behind "$v_behind" \
-      --argjson lastCommit "${last_commit:-0}" \
-      '. + [{name: $name, path: $path, state: $state, dirty: $dirty, ahead: $ahead, behind: $behind, lastCommit: $lastCommit}]' \
+      --argjson lastCommit "${last_commit:-0}" --argjson copies "$copies" \
+      '. + [{name: $name, path: $path, state: $state, dirty: $dirty, ahead: $ahead, behind: $behind, lastCommit: $lastCommit, conflictCopies: $copies}]' \
       <<<"$vaults_json")
   done < <(find "$dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0 | sort -z)
 
@@ -197,6 +200,85 @@ cmd_fetch() {
   with_lock "$dir" do_fetch "$dir"
 }
 
+# "notes/todo.md" -> "notes/todo (conflict <host> <stamp>).md"; if that name is
+# taken, "... <stamp> 2).md", "... 3).md", and so on.
+conflict_copy_name() {
+  local dir="$1" path="$2" stamp="$3" dirpart base stem ext tag candidate n=1
+  dirpart=$(dirname -- "$path")
+  base=$(basename -- "$path")
+  if [[ $base =~ ^[^.].*\.[^.]+$ ]]; then
+    stem="${base%.*}"; ext=".${base##*.}"
+  else
+    stem="$base"; ext=""
+  fi
+  while :; do
+    tag="conflict $stamp"; (( n > 1 )) && tag="$tag $n"
+    candidate="$stem ($tag)$ext"
+    [[ $dirpart != . ]] && candidate="$dirpart/$candidate"
+    [[ -e $dir/$candidate ]] || break
+    n=$((n + 1))
+  done
+  printf '%s' "$candidate"
+}
+
+# Resolve every unmerged path of the commit being replayed. During a rebase,
+# stage 2 is the upstream version and stage 3 is the local one. The upstream
+# version keeps the name and the local one is saved beside it; when one side
+# deleted the file, the surviving edit is kept and no copy is made.
+resolve_conflicts_with_copies() {
+  local dir="$1" stamp="$2" path stages copy
+  while IFS= read -r -d '' path; do
+    stages=$(git -C "$dir" ls-files -u -z -- "$path" | tr '\0' '\n' | awk '{print $3}' | sort -u | tr -d '\n')
+    case "$stages" in
+      *2*3*)
+        # One copy per note per sync: later local commits touching the same
+        # note refresh it, so it ends up holding the latest local version.
+        copy="${COPY_FOR[$path]:-}"
+        [[ -n $copy ]] || copy=$(conflict_copy_name "$dir" "$path" "$stamp")
+        mkdir -p "$dir/$(dirname -- "$copy")"
+        git -C "$dir" cat-file -p ":3:$path" >"$dir/$copy" || return 1
+        git -C "$dir" checkout --ours -- "$path" || return 1
+        git -C "$dir" add -- "$path" "$copy" || return 1
+        [[ -n ${COPY_FOR[$path]:-} ]] || CONFLICT_COPIES+=("$copy")
+        COPY_FOR[$path]="$copy"
+        ;;
+      *3*) git -C "$dir" checkout --theirs -- "$path" && git -C "$dir" add -- "$path" || return 1 ;;
+      *2*) git -C "$dir" checkout --ours -- "$path" && git -C "$dir" add -- "$path" || return 1 ;;
+      *)   git -C "$dir" rm -q --cached -- "$path" >/dev/null 2>&1 ;;
+    esac
+  done < <(git -C "$dir" diff --name-only --diff-filter=U -z)
+  [[ -z $(git -C "$dir" diff --name-only --diff-filter=U) ]]
+}
+
+# Rebase onto upstream, turning content conflicts into conflict copies.
+# Anything unexpected aborts the rebase, so the repo is never left mid-rebase.
+rebase_with_conflict_copies() {
+  local dir="$1" gitdir stamp out tries=0
+  gitdir=$(git -C "$dir" rev-parse --absolute-git-dir)
+  stamp="$(hostname) $(date '+%Y-%m-%d %H%M')"
+  CONFLICT_COPIES=()
+  declare -gA COPY_FOR=()
+  out=$(git -C "$dir" rebase --autostash '@{u}' 2>&1) && return 0
+  while [[ -d $gitdir/rebase-merge || -d $gitdir/rebase-apply ]]; do
+    tries=$((tries + 1))
+    if (( tries > 200 )) || ! resolve_conflicts_with_copies "$dir" "$stamp"; then
+      git -C "$dir" rebase --abort >/dev/null 2>&1
+      return 1
+    fi
+    # A commit whose changes all lost to upstream has nothing left to apply.
+    if git -C "$dir" diff --cached --quiet; then
+      out=$(git -C "$dir" rebase --skip 2>&1) && break
+    else
+      out=$(GIT_EDITOR=true git -C "$dir" rebase --continue 2>&1) && break
+    fi
+    [[ -n $(git -C "$dir" diff --name-only --diff-filter=U) ]] && continue
+    [[ -d $gitdir/rebase-merge || -d $gitdir/rebase-apply ]] || break
+    git -C "$dir" rebase --abort >/dev/null 2>&1
+    return 1
+  done
+  [[ ! -d $gitdir/rebase-merge && ! -d $gitdir/rebase-apply ]]
+}
+
 do_sync() {
   local dir="$1" vault="$2" scope="." label="all vaults" out gitdir
   gitdir=$(git -C "$dir" rev-parse --absolute-git-dir)
@@ -219,15 +301,20 @@ do_sync() {
   fi
 
   # 2. Integrate remote changes. Autostash covers dirty files in *other*
-  #    vaults when syncing just one. On conflict, abort so the working tree
-  #    never stays full of conflict markers that Obsidian would happily open.
+  #    vaults when syncing just one. Notes changed on both sides keep the
+  #    remote version under their name and the local one as a conflict copy,
+  #    so the working tree never holds conflict markers.
+  CONFLICT_COPIES=()
+  local stashes_before
+  stashes_before=$(git -C "$dir" stash list | wc -l)
   out=$(git -C "$dir" fetch --quiet --prune origin 2>&1) || fail "fetch failed: $(git_error "$out")"
   if has_upstream "$dir" && [[ -n $(git -C "$dir" rev-list -1 'HEAD..@{u}') ]]; then
-    if ! out=$(git -C "$dir" rebase --autostash '@{u}' 2>&1); then
-      git -C "$dir" rebase --abort >/dev/null 2>&1
-      fail "local and remote edits conflict; your changes are committed locally but not pushed. Resolve with: cd \"$dir\" && git pull --rebase"
-    fi
+    rebase_with_conflict_copies "$dir" \
+      || fail "local and remote edits could not be combined automatically; your changes are committed locally but not pushed. Resolve with: cd \"$dir\" && git pull --rebase"
   fi
+  # A failed autostash re-apply leaves the stash in place rather than losing it.
+  (( $(git -C "$dir" stash list | wc -l) > stashes_before )) \
+    && fail "synced, but uncommitted changes in other vaults could not be re-applied; they are safe in: cd \"$dir\" && git stash list"
 
   # 3. Publish.
   if has_upstream "$dir"; then
@@ -238,6 +325,15 @@ do_sync() {
     out=$(git -C "$dir" push --quiet -u origin HEAD 2>&1) || fail "push failed: $(git_error "$out")"
   fi
 
+  if (( ${#CONFLICT_COPIES[@]} )); then
+    printf '%s\0' "${CONFLICT_COPIES[@]}" | jq -Rsc --arg label "$label" '
+      split("\u0000") | map(select(. != "")) as $copies
+      | {ok: true, conflicts: ($copies | length), conflictCopies: $copies,
+         message: ("Synced " + $label + " · kept " + ($copies | length | tostring)
+           + (if ($copies | length) == 1 then " conflict copy" else " conflict copies" end)
+           + " to merge")}'
+    exit 0
+  fi
   ok "Synced $label"
 }
 

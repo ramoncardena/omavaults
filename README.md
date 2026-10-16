@@ -120,14 +120,36 @@ the copy.
 | local changes | uncommitted edits |
 | commits to push | committed locally, not pushed |
 | updates available | remote has new commits for this vault |
-| diverged | both sides changed; sync will rebase |
-| conflict | a rebase/merge is in progress in the repo |
+| diverged | both sides changed; sync will combine them |
+| conflict copies to merge | a note was edited on two devices; see below |
+| conflict | a rebase/merge you started by hand is in progress in the repo |
 
 **Sync** = `git add` + commit (scoped to the vault, or everything for Sync
-all) → `fetch` → `rebase --autostash` onto upstream → `push`. If the rebase
-conflicts it is aborted: your commit stays local, the vault shows *diverged*,
-and the working tree is left clean (no conflict markers). Resolve with
-`git pull --rebase` in the repo. Nothing is ever force-pushed.
+all) → `fetch` → `rebase --autostash` onto upstream → `push`. Nothing is ever
+force-pushed, and published history is never rewritten.
+
+### Notes edited on two devices
+
+When the same note changed here and on another device, the sync still
+finishes, and nothing is lost:
+
+```
+Projects/Index.md                                   ← the version from the remote
+Projects/Index (conflict laptop 2026-10-16 1409).md ← your version, from this device
+```
+
+- The copy is committed and pushed, so every device sees it. The vault shows
+  *conflict copies to merge*, the bar icon flags it, and a notification names
+  the files.
+- Merge the two by hand, delete the copy, and sync again.
+- If one device deleted a note and the other edited it, the edit is kept and no
+  copy is made.
+- One copy per note per sync: if several unsynced local commits touched the same
+  note, the copy holds your latest version.
+- Works for attachments too (the copy is byte-for-byte your file).
+- No conflict markers are ever written into notes. If something can't be
+  combined automatically, the sync stops cleanly instead: your changes stay
+  committed locally, unpushed, and the panel says how to resolve them.
 
 Status refreshes locally every minute and fetches from the remote every
 `refreshIntervalSec`. The bar runs one widget per monitor; they share a single
@@ -175,7 +197,8 @@ the source before installing. What it does:
   its own widget entry in `~/.config/omarchy/shell.json` and
   `~/.config/omavaults/config.json` when you save settings.
 - **Git**: commits with your configured git identity. It never force-pushes
-  or rewrites published history; a conflicting rebase is aborted.
+  or rewrites published history. Notes changed on both sides are kept as
+  conflict copies next to the original.
 - **Processes**: launches Obsidian through `xdg-open`. It quits Obsidian
   (`SIGTERM`, a normal shutdown) only after you confirm the restart prompt.
 - No root, no services, no background daemons beyond the shell itself.

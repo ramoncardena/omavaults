@@ -65,16 +65,69 @@ check "after sync: Work pulled" test "$(state_of Work)" = synced
 (cd "$T/other" && git pull -q)
 check "commit reached remote" grep -q edit "$T/other/Personal/journal.md"
 
-# Conflict: both sides rewrite the same line. Sync must abort cleanly.
+# Conflict: both sides rewrite the same line. The remote version keeps the
+# name, the local one is saved as a conflict copy, and the sync completes.
 (cd "$T/other" && echo "remote line" >Work/todo.md && git commit -qam conflict && git push -q)
 echo "local line" >"$T/local/Work/todo.md"
 echo "keep me" >>"$T/local/Personal/journal.md"
-"$HELPER" sync "$T/local" Work >/dev/null
-check "conflicting sync fails" test $? -ne 0
+out=$("$HELPER" sync "$T/local" Work)
+check "conflicting sync succeeds" test "$(jq -r .ok <<<"$out")" = true
+check "sync reports one conflict copy" test "$(jq -r .conflicts <<<"$out")" = 1
+check "remote version keeps the name" test "$(cat "$T/local/Work/todo.md")" = "remote line"
+copy=$(jq -r '.conflictCopies[0]' <<<"$out")
+check "copy is named after the note" bash -c "[[ '$copy' == 'Work/todo (conflict '*').md' ]]"
+check "copy holds the local version" test "$(cat "$T/local/$copy")" = "local line"
 check "no rebase left behind" test ! -d "$T/local/.git/rebase-merge" -a ! -d "$T/local/.git/rebase-apply"
-check "no conflict markers" bash -c "! grep -q '<<<<<<<' '$T/local/Work/todo.md'"
+check "no conflict markers" bash -c "! grep -rq '<<<<<<<' '$T/local/Work'"
 check "other vault's edits kept" grep -q "keep me" "$T/local/Personal/journal.md"
-check "conflict -> diverged" test "$(state_of Work)" = diverged
+check "nothing left to push" test -z "$(git -C "$T/local" rev-list '@{u}..HEAD')"
+(cd "$T/other" && git pull -q)
+check "copy reached the remote" test -f "$T/other/$copy"
+check "vault with copies needs attention" test "$(state_of Work)" = copies
+check "status counts copies" test "$("$HELPER" status "$T/local" | jq -r '.vaults[] | select(.name == "Work") | .conflictCopies')" = 1
+rm "$T/local/$copy"; "$HELPER" sync "$T/local" Work >/dev/null
+check "deleting the copy clears it" test "$(state_of Work)" = synced
+(cd "$T/other" && git pull -q)
+
+# Edit vs delete: the edit survives, no copy.
+(cd "$T/other" && echo base >Work/a.md && echo base >Work/b.md && git add -A && git commit -qm ab && git push -q)
+"$HELPER" sync "$T/local" Work >/dev/null
+(cd "$T/other" && git rm -q Work/a.md && echo "remote edit" >Work/b.md && git commit -qam "rm a, edit b" && git push -q)
+echo "local edit" >"$T/local/Work/a.md"; rm "$T/local/Work/b.md"
+out=$("$HELPER" sync "$T/local" Work)
+check "edit/delete sync succeeds" test "$(jq -r .ok <<<"$out")" = true
+check "local edit beats remote delete" test "$(cat "$T/local/Work/a.md" 2>/dev/null)" = "local edit"
+check "remote edit beats local delete" test "$(cat "$T/local/Work/b.md" 2>/dev/null)" = "remote edit"
+check "edit/delete makes no copies" test "$(jq -r '.conflicts // 0' <<<"$out")" = 0
+(cd "$T/other" && git pull -q)
+
+# Several unpushed local commits on the same note (e.g. syncs while offline).
+echo "draft 1" >"$T/local/Work/c.md"; git -C "$T/local" add -A; git -C "$T/local" commit -qm c1
+echo "draft 2" >"$T/local/Work/c.md"; git -C "$T/local" commit -qam c2
+(cd "$T/other" && echo "theirs" >Work/c.md && git add -A && git commit -qm c && git push -q)
+out=$("$HELPER" sync "$T/local" Work)
+check "multi-commit conflict sync succeeds" test "$(jq -r .ok <<<"$out")" = true
+check "remote keeps the name (multi)" test "$(cat "$T/local/Work/c.md")" = "theirs"
+check "one copy per note per sync" test "$(jq -r .conflicts <<<"$out")" = 1
+check "the copy holds the latest local draft" test "$(cat "$T/local/$(jq -r '.conflictCopies[0]' <<<"$out")")" = "draft 2"
+(cd "$T/other" && git pull -q)
+find "$T/local/Work" -name '* (conflict *' -delete; "$HELPER" sync "$T/local" Work >/dev/null; (cd "$T/other" && git pull -q)
+
+# Binary attachments: the copy must be byte-identical to the local file.
+head -c 2048 /dev/urandom >"$T/local/Work/img.png"; "$HELPER" sync "$T/local" Work >/dev/null; (cd "$T/other" && git pull -q)
+head -c 2048 /dev/urandom >"$T/other/Work/img.png"; (cd "$T/other" && git commit -qam img && git push -q)
+head -c 2048 /dev/urandom >"$T/local/Work/img.png"; cp "$T/local/Work/img.png" "$T/mine.png"
+out=$("$HELPER" sync "$T/local" Work)
+bcopy=$(jq -r '.conflictCopies[0]' <<<"$out")
+check "binary conflict copy is byte-identical" cmp -s "$T/mine.png" "$T/local/$bcopy"
+check "binary keeps remote under its name" cmp -s "$T/other/Work/img.png" "$T/local/Work/img.png"
+
+# A second conflict on the same note in the same minute gets a distinct name.
+(cd "$T/other" && git pull -q && echo r2 >Work/img.png && git commit -qam img2 && git push -q)
+echo l2 >"$T/local/Work/img.png"
+out=$("$HELPER" sync "$T/local" Work)
+check "repeat conflict copy gets a new name" bash -c "[[ '$(jq -r '.conflictCopies[0]' <<<"$out")' != '$bcopy' && -f '$T/local/$bcopy' ]]"
+find "$T/local/Work" -name '* (conflict *' -delete; "$HELPER" sync "$T/local" Work >/dev/null; (cd "$T/other" && git pull -q)
 
 touch "$T/local/.git/FETCH_HEAD"
 check "fetch --max-age skips a recent fetch" test "$("$HELPER" fetch "$T/local" --max-age 300 | jq -r .message)" = "Fetched recently"
