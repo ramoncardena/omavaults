@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.ramoncardena.omavaults",
+  "name": "omaVaults",
+  "version": "0.1.0",
+  "author": "Ramon Cardena",
+  "license": "MIT",
+  "description": "Obsidian vaults from a git repo in the Omarchy bar: see each vault's sync state, sync on demand, and open it in Obsidian.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "OmaVaults.qml"
+  },
+  "barWidget": {
+    "displayName": "Vaults",
+    "description": "Open and sync Obsidian vaults stored in a git repository.",
+    "category": "Productivity",
+    "defaultSection": "right",
+    "aliases": ["obsidian", "vaults", "notes"],
+    "allowMultiple": false,
+    "defaults": {
+      "repoUrl": "",
+      "localPath": "~/Vaults",
+      "refreshIntervalSec": 300
+    },
+    "schema": [
+      { "key": "repoUrl", "type": "string", "label": "Repository URL", "defaultValue": "" },
+      { "key": "localPath", "type": "string", "label": "Local folder", "defaultValue": "~/Vaults" },
+      { "key": "refreshIntervalSec", "type": "integer", "label": "Fetch interval (seconds)", "min": 30, "max": 86400, "step": 30, "defaultValue": 300 }
+    ]
+  }
+}

@@ -1,0 +1,376 @@
+#!/bin/bash
+
+# omaVaults helper: git + Obsidian plumbing for the omaVaults bar widget.
+#
+# Every command prints a single JSON object on stdout. Failures print
+# {"ok":false,"error":"..."} and exit non-zero, so the QML side can show the
+# message without parsing stderr.
+#
+#   omavaults status <dir>               repo + per-vault sync state
+#   omavaults clone  <url> <dir>         clone the vaults repo
+#   omavaults fetch  <dir>               refresh remote-tracking refs
+#   omavaults sync   <dir> [vault]       commit, pull --rebase, push
+#   omavaults create <dir> <name>        new vault folder, committed and pushed
+#   omavaults open   [--restart] <dir> <vault>
+#                                        register the vault and open it in Obsidian;
+#                                        exits 3 with needsRestart if Obsidian must restart
+#
+# A vault is any non-hidden top-level directory of the repo.
+
+set -uo pipefail
+
+# Never block on a credential or host-key prompt: there is no terminal behind
+# the bar. Respect a user-provided GIT_SSH_COMMAND.
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}"
+
+# The bar is often started without SSH_AUTH_SOCK in its environment; fall back
+# to the systemd user agent socket so keys loaded there are usable.
+if [[ -z ${SSH_AUTH_SOCK:-} && -S ${XDG_RUNTIME_DIR:-/run/user/$UID}/ssh-agent.socket ]]; then
+  export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR:-/run/user/$UID}/ssh-agent.socket"
+fi
+
+OBSIDIAN_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/obsidian/obsidian.json"
+
+fail() {
+  jq -cn --arg error "$*" '{ok: false, error: $error}'
+  exit 1
+}
+
+ok() {
+  jq -cn --arg message "${1:-}" '{ok: true, message: $message}'
+  exit 0
+}
+
+# Sets $dir (not echoed: fail() must exit the main shell, not a subshell).
+expand_dir() {
+  dir="${1:-}"
+  [[ -n $dir ]] || fail "no local path configured"
+  [[ $dir == "~" || $dir == "~/"* ]] && dir="$HOME${dir:1}"
+  dir="${dir%/}"
+}
+
+valid_vault() {
+  local name="$1"
+  [[ -n $name && $name != .* && $name != */* ]]
+}
+
+in_repo() {
+  git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+has_upstream() {
+  git -C "$1" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1
+}
+
+# The first "fatal:"/"error:" line is the useful one; fall back to the last line.
+git_error() {
+  if [[ $1 == *"Permission denied (publickey)"* ]]; then
+    printf '%s' "SSH key not available (passphrase-protected key with no ssh-agent?). Use the HTTPS URL, or run: ssh-add"
+    return
+  fi
+  local line
+  line=$(printf '%s\n' "$1" | grep -m1 -E '^(fatal|error): ')
+  [[ -n $line ]] || line=$(printf '%s\n' "$1" | grep -v '^\s*$' | tail -n 1)
+  printf '%s' "$line" | sed -E 's/^(fatal|error): //'
+}
+
+# Serialize everything that mutates refs, so the periodic fetch never races a
+# sync started from the panel.
+with_lock() {
+  local dir="$1"
+  shift
+  local gitdir
+  gitdir=$(git -C "$dir" rev-parse --absolute-git-dir 2>/dev/null) || fail "not a git repository: $dir"
+  exec 9>"$gitdir/omavaults.lock"
+  flock -w 120 9 || fail "another sync is still running"
+  "$@"
+}
+
+cmd_status() {
+  local dir
+  expand_dir "${1:-}"
+
+  if ! in_repo "$dir"; then
+    jq -cn --arg dir "$dir" --argjson exists "$([[ -e $dir ]] && echo true || echo false)" \
+      '{ok: true, cloned: false, exists: $exists, dir: $dir, vaults: []}'
+    return
+  fi
+
+  local branch upstream=false ahead=0 behind=0 rebasing=false last_fetch=0 remote_url gitdir
+  gitdir=$(git -C "$dir" rev-parse --absolute-git-dir)
+  branch=$(git -C "$dir" symbolic-ref --short -q HEAD || echo "")
+  remote_url=$(git -C "$dir" remote get-url origin 2>/dev/null || echo "")
+  [[ -d $gitdir/rebase-merge || -d $gitdir/rebase-apply || -f $gitdir/MERGE_HEAD ]] && rebasing=true
+  [[ -f $gitdir/FETCH_HEAD ]] && last_fetch=$(stat -c %Y "$gitdir/FETCH_HEAD")
+
+  if has_upstream "$dir"; then
+    upstream=true
+    read -r ahead behind < <(git -C "$dir" rev-list --left-right --count 'HEAD...@{u}' 2>/dev/null || echo "0 0")
+  fi
+
+  local vaults_json="[]" name path dirty v_ahead v_behind conflicts state last_commit
+  while IFS= read -r -d '' path; do
+    name=$(basename "$path")
+    dirty=$(git -C "$dir" status --porcelain --untracked-files=all -- "$name" 2>/dev/null | wc -l)
+    conflicts=$(git -C "$dir" diff --name-only --diff-filter=U -- "$name" 2>/dev/null | wc -l)
+    v_ahead=0
+    v_behind=0
+    if $upstream; then
+      v_ahead=$(git -C "$dir" rev-list --count '@{u}..HEAD' -- "$name" 2>/dev/null || echo 0)
+      v_behind=$(git -C "$dir" rev-list --count 'HEAD..@{u}' -- "$name" 2>/dev/null || echo 0)
+    fi
+    last_commit=$(git -C "$dir" log -1 --format=%ct -- "$name" 2>/dev/null || echo "")
+
+    if (( conflicts > 0 )) || $rebasing; then state="conflict"
+    elif (( v_ahead > 0 && v_behind > 0 )) || (( dirty > 0 && v_behind > 0 )); then state="diverged"
+    elif (( v_behind > 0 )); then state="behind"
+    elif (( dirty > 0 )); then state="modified"
+    elif (( v_ahead > 0 )); then state="ahead"
+    elif ! $upstream; then state="unpublished"
+    else state="synced"
+    fi
+
+    vaults_json=$(jq -c \
+      --arg name "$name" --arg path "$path" --arg state "$state" \
+      --argjson dirty "$dirty" --argjson ahead "$v_ahead" --argjson behind "$v_behind" \
+      --argjson lastCommit "${last_commit:-0}" \
+      '. + [{name: $name, path: $path, state: $state, dirty: $dirty, ahead: $ahead, behind: $behind, lastCommit: $lastCommit}]' \
+      <<<"$vaults_json")
+  done < <(find "$dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0 | sort -z)
+
+  register_repo_vaults "$dir"
+
+  jq -cn \
+    --arg dir "$dir" --arg branch "$branch" --arg remote "$remote_url" \
+    --argjson upstream "$upstream" --argjson ahead "${ahead:-0}" --argjson behind "${behind:-0}" \
+    --argjson rebasing "$rebasing" --argjson lastFetch "$last_fetch" \
+    --argjson vaults "$vaults_json" \
+    '{ok: true, cloned: true, dir: $dir, remote: $remote, branch: $branch, upstream: $upstream,
+      ahead: $ahead, behind: $behind, rebasing: $rebasing, lastFetch: $lastFetch, vaults: $vaults}'
+}
+
+cmd_clone() {
+  local url="${1:-}" dir out
+  [[ -n $url ]] || fail "no repository URL configured"
+  expand_dir "${2:-}"
+  in_repo "$dir" && ok "Already cloned"
+  if [[ -e $dir ]] && [[ -n $(ls -A "$dir" 2>/dev/null) ]]; then
+    fail "$dir exists and is not empty"
+  fi
+  mkdir -p "$(dirname "$dir")" || fail "cannot create $(dirname "$dir")"
+  out=$(git clone --quiet "$url" "$dir" 2>&1) || fail "clone failed: $(git_error "$out")"
+  ok "Cloned into $dir"
+}
+
+do_fetch() {
+  local dir="$1" out
+  git -C "$dir" remote get-url origin >/dev/null 2>&1 || fail "repository has no 'origin' remote"
+  out=$(git -C "$dir" fetch --quiet --prune origin 2>&1) || fail "fetch failed: $(git_error "$out")"
+  ok "Fetched"
+}
+
+cmd_fetch() {
+  local dir
+  expand_dir "${1:-}"
+  in_repo "$dir" || fail "not cloned yet"
+  with_lock "$dir" do_fetch "$dir"
+}
+
+do_sync() {
+  local dir="$1" vault="$2" scope="." label="all vaults" out gitdir
+  gitdir=$(git -C "$dir" rev-parse --absolute-git-dir)
+  if [[ -n $vault ]]; then
+    valid_vault "$vault" && [[ -d $dir/$vault ]] || fail "unknown vault: $vault"
+    scope="$vault"
+    label="$vault"
+  fi
+
+  [[ -d $gitdir/rebase-merge || -d $gitdir/rebase-apply || -f $gitdir/MERGE_HEAD ]] \
+    && fail "a rebase or merge is in progress in $dir; finish it manually first"
+  git -C "$dir" symbolic-ref -q HEAD >/dev/null || fail "repository is on a detached HEAD"
+
+  # 1. Commit local changes in scope.
+  git -C "$dir" add -A -- "$scope" || fail "git add failed"
+  if ! git -C "$dir" diff --cached --quiet -- "$scope"; then
+    local msg
+    msg="omaVaults: sync $label from $(hostname) at $(date '+%Y-%m-%d %H:%M')"
+    out=$(git -C "$dir" commit --quiet -m "$msg" -- "$scope" 2>&1) || fail "commit failed: $(git_error "$out")"
+  fi
+
+  # 2. Integrate remote changes. Autostash covers dirty files in *other*
+  #    vaults when syncing just one. On conflict, abort so the working tree
+  #    never stays full of conflict markers that Obsidian would happily open.
+  out=$(git -C "$dir" fetch --quiet --prune origin 2>&1) || fail "fetch failed: $(git_error "$out")"
+  if has_upstream "$dir" && [[ -n $(git -C "$dir" rev-list -1 'HEAD..@{u}') ]]; then
+    if ! out=$(git -C "$dir" rebase --autostash '@{u}' 2>&1); then
+      git -C "$dir" rebase --abort >/dev/null 2>&1
+      fail "local and remote edits conflict; your changes are committed locally but not pushed. Resolve with: cd \"$dir\" && git pull --rebase"
+    fi
+  fi
+
+  # 3. Publish.
+  if has_upstream "$dir"; then
+    if [[ -n $(git -C "$dir" rev-list -1 '@{u}..HEAD') ]]; then
+      out=$(git -C "$dir" push --quiet 2>&1) || fail "push failed: $(git_error "$out")"
+    fi
+  elif git -C "$dir" rev-parse -q --verify HEAD >/dev/null; then
+    out=$(git -C "$dir" push --quiet -u origin HEAD 2>&1) || fail "push failed: $(git_error "$out")"
+  fi
+
+  ok "Synced $label"
+}
+
+# A new vault: minimal Obsidian config plus a .gitignore for the per-device
+# workspace files, so opening the vault doesn't immediately mark it modified.
+do_create() {
+  local dir="$1" name="$2" path out
+  path="$dir/$name"
+  [[ -e $path ]] && fail "a vault or file named \"$name\" already exists"
+
+  mkdir -p "$path/.obsidian" || fail "cannot create $path"
+  echo '{}' >"$path/.obsidian/app.json"
+  cat >"$path/.gitignore" <<'IGNORE'
+# Per-device Obsidian state
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache
+.trash/
+IGNORE
+  printf '# %s\n' "$name" >"$path/Welcome.md"
+
+  # Sync in a subshell so a failed push still reports the vault as created.
+  if out=$(do_sync "$dir" "$name"); then
+    ok "Created $name"
+  fi
+  jq -cn --arg name "$name" --arg error "$(jq -r '.error // empty' <<<"$out" 2>/dev/null)" \
+    '{ok: true, message: ("Created " + $name + " locally; not pushed yet" + (if $error != "" then " (" + $error + ")" else "" end))}'
+  exit 0
+}
+
+cmd_create() {
+  local dir name
+  expand_dir "${1:-}"
+  name="${2:-}"
+  # Trim surrounding whitespace; vault names become folder names.
+  name="${name#"${name%%[![:space:]]*}"}"
+  name="${name%"${name##*[![:space:]]}"}"
+  in_repo "$dir" || fail "not cloned yet"
+  valid_vault "$name" || fail "invalid vault name: names can't be empty, start with '.', or contain '/'"
+  [[ $name =~ [[:cntrl:]] ]] && fail "invalid vault name: control characters aren't allowed"
+  (( ${#name} <= 100 )) || fail "vault name is too long"
+  with_lock "$dir" do_create "$dir" "$name"
+}
+
+cmd_sync() {
+  local dir
+  expand_dir "${1:-}"
+  in_repo "$dir" || fail "not cloned yet"
+  with_lock "$dir" do_sync "$dir" "${2:-}"
+}
+
+# Obsidian only opens vaults listed in obsidian.json, and only reads that file
+# at startup: a running instance answers an unknown path with "Vault not
+# found", and rewrites the file from memory (dropping anything added behind its
+# back). So the file is only ever written while Obsidian is not running.
+
+obsidian_pid() {
+  # The Electron main process (renderers carry --type=).
+  pgrep -f -- '[/ ]obsidian(/app\.asar|$| )' 2>/dev/null | while read -r pid; do
+    grep -qa -- '--type=' "/proc/$pid/cmdline" 2>/dev/null || { echo "$pid"; break; }
+  done
+}
+
+is_registered() {
+  [[ -s $OBSIDIAN_CONFIG ]] &&
+    jq -e --arg p "$1" '(.vaults // {}) | any(.[]; .path == $p)' "$OBSIDIAN_CONFIG" >/dev/null 2>&1
+}
+
+# Adds every given path that is not registered yet. Caller ensures Obsidian is
+# not running.
+register_vaults() {
+  local missing=() path tmp
+  for path in "$@"; do is_registered "$path" || missing+=("$path"); done
+  (( ${#missing[@]} )) || return 0
+
+  mkdir -p "$(dirname "$OBSIDIAN_CONFIG")"
+  [[ -s $OBSIDIAN_CONFIG ]] || echo '{"vaults":{}}' >"$OBSIDIAN_CONFIG"
+  jq -e . "$OBSIDIAN_CONFIG" >/dev/null 2>&1 || fail "cannot parse $OBSIDIAN_CONFIG"
+
+  local additions="{}" ts
+  ts=$(date +%s%3N)
+  for path in "${missing[@]}"; do
+    additions=$(jq -c --arg id "$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" --arg p "$path" --argjson ts "$ts" \
+      '. + {($id): {path: $p, ts: $ts}}' <<<"$additions")
+  done
+
+  tmp=$(mktemp "$OBSIDIAN_CONFIG.XXXXXX") || fail "cannot write $OBSIDIAN_CONFIG"
+  if jq --argjson add "$additions" '.vaults = ((.vaults // {}) + $add)' "$OBSIDIAN_CONFIG" >"$tmp"; then
+    mv "$tmp" "$OBSIDIAN_CONFIG"
+  else
+    rm -f "$tmp"
+    fail "cannot update $OBSIDIAN_CONFIG"
+  fi
+}
+
+# Pre-register the repo's vaults whenever it is safe, so clicking one later
+# never needs an Obsidian restart.
+register_repo_vaults() {
+  local dir="$1" paths=() path
+  [[ -n $(obsidian_pid) ]] && return 0
+  while IFS= read -r -d '' path; do paths+=("$(realpath "$path")"); done \
+    < <(find "$dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0)
+  (( ${#paths[@]} )) && register_vaults "${paths[@]}" 2>/dev/null
+  return 0
+}
+
+stop_obsidian() {
+  local pid
+  pid=$(obsidian_pid)
+  [[ -n $pid ]] || return 0
+  kill -TERM "$pid" 2>/dev/null
+  for _ in $(seq 50); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.2
+  done
+  fail "Obsidian did not quit; close it and try again"
+}
+
+cmd_open() {
+  local dir vault path uri restart=false
+  if [[ ${1:-} == --restart ]]; then restart=true; shift; fi
+  expand_dir "${1:-}"
+  vault="${2:-}"
+  valid_vault "$vault" || fail "invalid vault name: $vault"
+  path=$(realpath -e "$dir/$vault" 2>/dev/null) || fail "vault not found: $vault"
+  [[ -d $path/.obsidian ]] || mkdir -p "$path/.obsidian"
+
+  if ! is_registered "$path"; then
+    if [[ -n $(obsidian_pid) ]]; then
+      $restart || {
+        jq -cn --arg vault "$vault" \
+          '{ok: false, needsRestart: true, vault: $vault, error: ("Obsidian must restart once to add \"" + $vault + "\"")}'
+        exit 3
+      }
+      stop_obsidian
+    fi
+    register_vaults "$path"
+  fi
+
+  uri="obsidian://open?path=$(jq -rn --arg p "$path" '$p | @uri')"
+  setsid -f xdg-open "$uri" >/dev/null 2>&1 </dev/null || fail "could not launch Obsidian"
+  ok "Opening $vault"
+}
+
+command -v git >/dev/null || fail "git is not installed"
+command -v jq >/dev/null || { echo '{"ok":false,"error":"jq is not installed"}'; exit 1; }
+
+case "${1:-}" in
+  status) shift; cmd_status "$@" ;;
+  clone) shift; cmd_clone "$@" ;;
+  fetch) shift; cmd_fetch "$@" ;;
+  sync) shift; cmd_sync "$@" ;;
+  create) shift; cmd_create "$@" ;;
+  open) shift; cmd_open "$@" ;;
+  *) fail "usage: omavaults {status|clone|fetch|sync|create|open} ..." ;;
+esac
