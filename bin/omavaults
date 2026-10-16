@@ -15,6 +15,7 @@
 #   omavaults import <dir> <folder> [name]
 #                                        copy an existing vault in, commit and push
 #   omavaults candidates <dir>           Obsidian vaults outside the repo
+#   omavaults pick-folder [start]        native folder chooser; prints the choice
 #   omavaults config-save <url> <dir> [interval]
 #                                        persist settings outside shell.json
 #   omavaults open   [--restart] <dir> <vault>
@@ -368,6 +369,84 @@ cmd_candidates() {
   jq -cn --argjson c "$list" '{ok: true, candidates: $c}'
 }
 
+# Folder chooser through the XDG desktop portal (the desktop's own dialog, no
+# extra packages), falling back to zenity or kdialog when the portal can't be
+# reached from Python.
+pick_folder_portal() {
+  python3 - "$1" <<'PY'
+import sys, json
+try:
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+except Exception:
+    sys.exit(2)
+
+start = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+except Exception:
+    sys.exit(2)
+
+token = "omavaults%d" % GLib.random_int()
+sender = bus.get_unique_name()[1:].replace(".", "_")
+handle = "/org/freedesktop/portal/desktop/request/%s/%s" % (sender, token)
+loop = GLib.MainLoop()
+result = {"code": 2, "uris": []}
+
+def on_response(_conn, _sender, _path, _iface, _signal, params):
+    code, results = params.unpack()
+    result["code"] = code
+    result["uris"] = results.get("uris", [])
+    loop.quit()
+
+# Subscribe before calling, so a fast response can't be missed.
+bus.signal_subscribe("org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request",
+                     "Response", handle, None, Gio.DBusSignalFlags.NO_MATCH_RULE, on_response)
+options = {
+    "handle_token": GLib.Variant("s", token),
+    "directory": GLib.Variant("b", True),
+    "modal": GLib.Variant("b", True),
+}
+if start:
+    options["current_folder"] = GLib.Variant("ay", list(start.encode()) + [0])
+try:
+    bus.call_sync("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                  "org.freedesktop.portal.FileChooser", "OpenFile",
+                  GLib.Variant("(ssa{sv})", ("", "Choose a vault folder to import", options)),
+                  None, Gio.DBusCallFlags.NONE, -1, None)
+except Exception:
+    sys.exit(2)
+loop.run()
+if result["code"] == 0 and result["uris"]:
+    print(Gio.File.new_for_uri(result["uris"][0]).get_path() or "")
+    sys.exit(0)
+sys.exit(1)  # cancelled
+PY
+}
+
+cmd_pick_folder() {
+  local start="${1:-$HOME}" path rc
+  [[ $start == "~" || $start == "~/"* ]] && start="$HOME${start:1}"
+  [[ -d $start ]] || start="$HOME"
+  path=$(pick_folder_portal "$start")
+  rc=$?
+  if (( rc == 2 )); then
+    if command -v zenity >/dev/null; then
+      path=$(zenity --file-selection --directory --filename="$start/" 2>/dev/null); rc=$?
+    elif command -v kdialog >/dev/null; then
+      path=$(kdialog --getexistingdirectory "$start" 2>/dev/null); rc=$?
+    else
+      fail "no folder chooser available (needs the XDG desktop portal with python-gobject, zenity, or kdialog); type the path instead"
+    fi
+  fi
+  if (( rc != 0 )) || [[ -z $path ]]; then
+    jq -cn '{ok: false, cancelled: true, error: "No folder chosen"}'
+    exit 1
+  fi
+  jq -cn --arg path "$path" '{ok: true, path: $path}'
+}
+
 cmd_config_save() {
   local url="${1:-}" path="${2:-}" interval="${3:-300}" tmp
   [[ -n $url ]] || fail "no repository URL given"
@@ -496,7 +575,8 @@ case "${1:-}" in
   create) shift; cmd_create "$@" ;;
   import) shift; cmd_import "$@" ;;
   candidates) shift; cmd_candidates "$@" ;;
+  pick-folder) shift; cmd_pick_folder "$@" ;;
   config-save) shift; cmd_config_save "$@" ;;
   open) shift; cmd_open "$@" ;;
-  *) fail "usage: omavaults {status|clone|fetch|sync|create|import|candidates|open|config-save} ..." ;;
+  *) fail "usage: omavaults {status|clone|fetch|sync|create|import|candidates|pick-folder|open|config-save} ..." ;;
 esac

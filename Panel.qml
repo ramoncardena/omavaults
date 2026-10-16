@@ -27,7 +27,7 @@ Panel {
     repoUrl: "", localPath: "", repo: { cloned: false, vaults: [] }, vaults: [],
     loaded: false, busy: false, busyAction: "", busyVault: "", statusMessage: "",
     errorMessage: "", restartVault: "", configured: false, hasConflict: false,
-    attentionCount: 0, summary: "", now: 0, candidates: []
+    attentionCount: 0, summary: "", now: 0, candidates: [], picking: false, pickedFolder: ""
   })
 
   readonly property color foreground: root.barForeground
@@ -51,7 +51,7 @@ Panel {
 
   function editSettings() {
     setup.editing = true
-    Qt.callLater(function() { urlField.forceActiveFocus(); urlField.selectAll() })
+    focusAfterShortcut(function() { urlField.forceActiveFocus(); urlField.selectAll() })
   }
 
   function finishSettings(save) {
@@ -64,7 +64,7 @@ Panel {
     if (!root.host.configured || !root.host.repo.cloned) return
     importing = false
     creating = true
-    Qt.callLater(function() { nameField.text = ""; nameField.forceActiveFocus() })
+    focusAfterShortcut(function() { nameField.text = ""; nameField.forceActiveFocus() })
   }
 
   function finishCreate(save) {
@@ -73,6 +73,20 @@ Panel {
     creating = false
     keyCatcher.forceActiveFocus()
     if (save) root.host.createVault(name)
+  }
+
+  // Forms opened by a letter key (n, i, ",") focus their field a beat later.
+  // Input methods such as fcitx5 deliver the typed character separately from
+  // the key press, so focusing at once lets that letter land in the field.
+  property var pendingFocus: null
+  Timer {
+    id: shortcutFocusTimer
+    interval: 120
+    onTriggered: if (root.pendingFocus) { var f = root.pendingFocus; root.pendingFocus = null; f() }
+  }
+  function focusAfterShortcut(fn) {
+    pendingFocus = fn
+    shortcutFocusTimer.restart()
   }
 
   function folderName(path) {
@@ -86,7 +100,7 @@ Panel {
     importing = true
     importNameEdited = false
     root.host.loadCandidates()
-    Qt.callLater(function() { sourceField.text = ""; importNameField.text = ""; sourceField.forceActiveFocus() })
+    focusAfterShortcut(function() { sourceField.text = ""; importNameField.text = ""; sourceField.forceActiveFocus() })
   }
 
   function pickCandidate(candidate) {
@@ -112,6 +126,15 @@ Panel {
   }
 
   onOpenedChanged: {
+    if (opened && root.host.pickedFolder !== "") {
+      var picked = root.host.pickedFolder
+      hostWidget.pickedFolder = ""
+      importing = true
+      Qt.callLater(function() { sourceField.text = picked; importNameField.forceActiveFocus(); importNameField.selectAll() })
+      return
+    }
+    if (opened && root.importing) return   // back from a cancelled chooser
+    if (!opened && root.host.picking) return
     if (opened) {
       if (hostWidget) hostWidget.refresh()
       if (!root.host.configured) Qt.callLater(function() { urlField.forceActiveFocus() })
@@ -260,23 +283,11 @@ Panel {
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
               }
-              Row {
-                spacing: Style.space(8)
-                Button {
-                  text: "Restart Obsidian"
-                  iconText: "󰜉"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  bordered: true
-                  enabled: !root.host.busy
-                  onClicked: root.host.restartAndOpen(root.host.restartVault)
-                }
-                Button {
-                  text: "Cancel"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  onClicked: root.host.restartVault = ""
-                }
+              FormActions {
+                acceptText: "Restart Obsidian"
+                acceptEnabled: !root.host.busy
+                onAccepted: root.host.restartAndOpen(root.host.restartVault)
+                onCancelled: root.host.restartVault = ""
               }
             }
           }
@@ -315,24 +326,12 @@ Panel {
               font.family: root.fontFamily
               onAccepted: root.finishSettings(true)
             }
-            Row {
-              spacing: Style.space(8)
-              Button {
-                id: saveButton
-                text: "Save"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                bordered: true
-                enabled: urlField.text.trim() !== ""
-                onClicked: root.finishSettings(true)
-              }
-              Button {
-                visible: setup.editing
-                text: "Cancel"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: root.finishSettings(false)
-              }
+            FormActions {
+              acceptText: "Save"
+              acceptEnabled: urlField.text.trim() !== ""
+              showCancel: setup.editing
+              onAccepted: root.finishSettings(true)
+              onCancelled: root.finishSettings(false)
             }
           }
 
@@ -387,23 +386,11 @@ Panel {
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
-            Row {
-              spacing: Style.space(8)
-              Button {
-                text: "Create"
-                iconText: "󰐕"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                bordered: true
-                enabled: !root.host.busy && nameField.text.trim() !== ""
-                onClicked: root.finishCreate(true)
-              }
-              Button {
-                text: "Cancel"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: root.finishCreate(false)
-              }
+            FormActions {
+              acceptText: "Create"
+              acceptEnabled: !root.host.busy && nameField.text.trim() !== ""
+              onAccepted: root.finishCreate(true)
+              onCancelled: root.finishCreate(false)
             }
           }
 
@@ -478,16 +465,34 @@ Panel {
               }
             }
 
-            TextField {
-              id: sourceField
+            RowLayout {
               width: parent.width
-              placeholderText: "Folder to import, e.g. ~/Notes/Work"
-              foreground: root.foreground
-              font.family: root.fontFamily
-              KeyNavigation.tab: importNameField
-              onTextChanged: if (!root.importNameEdited) importNameField.text = root.folderName(text)
-              onAccepted: root.finishImport(true)
-              Keys.onEscapePressed: function(event) { root.finishImport(false); event.accepted = true }
+              spacing: Style.space(6)
+              TextField {
+                id: sourceField
+                Layout.fillWidth: true
+                placeholderText: "Folder to import, e.g. ~/Notes/Work"
+                foreground: root.foreground
+                font.family: root.fontFamily
+                KeyNavigation.tab: importNameField
+                onTextChanged: if (!root.importNameEdited) importNameField.text = root.folderName(text)
+                onAccepted: root.finishImport(true)
+                Keys.onEscapePressed: function(event) { root.finishImport(false); event.accepted = true }
+                Keys.onPressed: function(event) {
+                  if (event.key === Qt.Key_O && (event.modifiers & Qt.ControlModifier)) {
+                    root.host.pickFolder(sourceField.text.trim())
+                    event.accepted = true
+                  }
+                }
+              }
+              PanelActionButton {
+                iconText: "󰉋"
+                tooltipText: "Browse for a folder (Ctrl+O)"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                enabled: !root.host.busy && !root.host.picking
+                onClicked: root.host.pickFolder(sourceField.text.trim())
+              }
             }
             TextField {
               id: importNameField
@@ -509,23 +514,11 @@ Panel {
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
-            Row {
-              spacing: Style.space(8)
-              Button {
-                text: "Import"
-                iconText: "󰋺"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                bordered: true
-                enabled: !root.host.busy && sourceField.text.trim() !== "" && importNameField.text.trim() !== ""
-                onClicked: root.finishImport(true)
-              }
-              Button {
-                text: "Cancel"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: root.finishImport(false)
-              }
+            FormActions {
+              acceptText: "Import"
+              acceptEnabled: !root.host.busy && sourceField.text.trim() !== "" && importNameField.text.trim() !== ""
+              onAccepted: root.finishImport(true)
+              onCancelled: root.finishImport(false)
             }
           }
 
@@ -660,4 +653,39 @@ Panel {
       }
     }
   }
+
+  // Primary + Cancel pair shared by every inline form: both bordered and the
+  // same width, so each form's buttons look alike.
+  component FormActions: Row {
+    id: actions
+    property string acceptText: "OK"
+    property bool acceptEnabled: true
+    property bool showCancel: true
+    signal accepted()
+    signal cancelled()
+    readonly property real buttonWidth: Math.max(acceptButton.implicitWidth, cancelButton.implicitWidth)
+
+    spacing: Style.space(8)
+    Button {
+      id: acceptButton
+      width: actions.buttonWidth
+      text: actions.acceptText
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      bordered: true
+      enabled: actions.acceptEnabled
+      onClicked: actions.accepted()
+    }
+    Button {
+      id: cancelButton
+      visible: actions.showCancel
+      width: actions.buttonWidth
+      text: "Cancel"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      bordered: true
+      onClicked: actions.cancelled()
+    }
+  }
+
 }

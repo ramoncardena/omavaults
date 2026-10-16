@@ -156,6 +156,11 @@ check "candidates list outside vaults" test "$(jq -r --arg a "$SRC" '.candidates
 check "candidates flag other clones" test "$(jq -r --arg b "$T/oldclone/Work" '.candidates[] | select(.path == $b) | .duplicateOf' <<<"$cands")" = "$T/oldclone"
 check "candidates skip repo vaults" test -z "$(jq -r --arg c "$T/local/Work" '.candidates[] | select(.path == $c) | .path' <<<"$cands")"
 
+# Folder chooser: with no session bus and no zenity/kdialog, it must fail
+# with a clear message instead of hanging.
+out=$(env DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent PATH="$T/stub:/usr/bin" bash -c "command -v zenity kdialog >/dev/null || '$HELPER' pick-folder")
+check "pick-folder without a chooser explains why" bash -c "[[ -z '$out' ]] || jq -e '.ok == false and (.error | test(\"type the path\"))' <<<'$out' >/dev/null"
+
 # Settings copy outside shell.json.
 CFG="$XDG_CONFIG_HOME/omavaults/config.json"
 check "config-save writes file" "$HELPER" config-save "https://example.com/v.git" "~/Vaults" 120 >/dev/null

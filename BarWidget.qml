@@ -46,6 +46,8 @@ BarWidget {
   property string restartVault: ""  // vault waiting for an "Obsidian must restart" confirmation
   property double now: Date.now()
   property var candidates: []       // Obsidian vaults outside the repo, for import
+  property bool picking: false      // folder chooser open; the panel is hidden meanwhile
+  property string pickedFolder: ""  // chooser result, consumed by the panel on reopen
 
   readonly property bool configured: repoUrl !== ""
   readonly property bool busy: busyAction !== ""
@@ -94,6 +96,16 @@ BarWidget {
   function importVault(source, name) {
     var trimmed = String(name).trim()
     run("import", trimmed, ["import", localPath, String(source).trim(), trimmed], "Importing " + trimmed + "…")
+  }
+  // The panel is a full-screen overlay, so a normal dialog would open behind
+  // it: hide the panel while the chooser is up, then bring it back.
+  function pickFolder(start) {
+    if (pickProc.running) return
+    picking = true
+    pickedFolder = ""
+    pickProc.command = [helperPath, "pick-folder", String(start || "")]
+    pickProc.running = true
+    close()
   }
   function loadCandidates() {
     if (!configured || !repo.cloned || candidatesProc.running) return
@@ -176,6 +188,18 @@ BarWidget {
         else if (result && result.error) root.errorMessage = result.error
         root.loaded = true
       }
+    }
+  }
+
+  Process {
+    id: pickProc
+    stdout: StdioCollector { id: pickOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var result = root.parse(pickOut.text)
+      if (result && result.ok) root.pickedFolder = result.path
+      else if (result && !result.cancelled && result.error) root.errorMessage = result.error
+      root.open()
+      root.picking = false
     }
   }
 

@@ -14,6 +14,8 @@ vault's sync state, syncs on demand, and opens a vault in Obsidian on click.
 - `git`, `jq`, `rsync`, `flock` and `setsid` (util-linux), `pgrep` (procps),
   `xdg-open`, and `omarchy-notification-send`; all ship with Omarchy
 - [Obsidian](https://obsidian.md) installed with the `obsidian://` URI handler
+- For **Browse**: the XDG desktop portal plus `python-gobject` (both ship
+  with Omarchy), or `zenity`/`kdialog`. Without them, type the path instead.
 - Non-interactive git access to your vaults repo (see *Authentication*)
 
 No root privileges, packages, services, or installers are needed.
@@ -90,7 +92,11 @@ the copy.
 
 - The form lists the vaults Obsidian already knows about outside the repo.
   Folders that are just another clone of this same repo are shown as
-  duplicates and can't be imported. Any other folder can be typed in.
+  duplicates and can't be imported. Any other folder can be typed in, or
+  chosen with **Browse** (the folder button, or `Ctrl+O` in the folder
+  field), which opens your desktop's folder dialog through the XDG desktop
+  portal. The panel hides while the dialog is open and comes back with the
+  path filled in.
 - The name defaults to the folder's name and must not already exist.
 - `.git`, `.obsidian/workspace*.json`, `.obsidian/cache`, and `.trash/` are
   not copied; a per-vault `.gitignore` is added if the folder has none.
