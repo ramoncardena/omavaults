@@ -83,6 +83,10 @@ Obsidian. If the push fails (offline, auth), the vault is still created and
 committed locally and shows as *commits to push*. Names can't start with `.`
 or contain `/`.
 
+<p align="center">
+  <img src="docs/screenshots/new-vault.png" alt="New vault form in the omaVaults panel with the name Garden typed in, above the vault list" width="480">
+</p>
+
 ### Importing a vault
 
 **Import** copies an existing vault folder into the repo as a new top-level
@@ -103,6 +107,10 @@ the copy.
 - Imports are refused if any file is 95 MB or larger, since git hosts reject
   files near 100 MB.
 - If the folder was its own git repo, its history is not carried over.
+
+<p align="center">
+  <img src="docs/screenshots/import-vault.png" alt="Import form listing two vaults Obsidian knows about plus a dimmed duplicate clone, with a folder path, the Browse button, and the vault name filled in" width="480">
+</p>
 
 ### Sync states
 
@@ -144,6 +152,10 @@ So omaVaults:
   pre-registers all repo vaults whenever that's the case;
 - if you open a vault Obsidian doesn't know yet while it's running, asks to
   restart Obsidian once (`Enter` confirms), then opens the vault.
+
+<p align="center">
+  <img src="docs/screenshots/restart-prompt.png" alt="Prompt in the omaVaults panel asking to restart Obsidian once so it can open the new vault Ideas" width="480">
+</p>
 
 Tip: add `.obsidian/workspace*.json` to the repo's `.gitignore`, or every
 vault will look modified whenever you open it.
