@@ -17,9 +17,24 @@ BarWidget {
   moduleName: "io.github.ramoncardena.omavaults"
 
   readonly property string helperPath: decodeURIComponent(String(Qt.resolvedUrl("bin/omavaults")).replace(/^file:\/\//, ""))
-  readonly property string repoUrl: String(setting("repoUrl", "")).trim()
-  readonly property string localPath: String(setting("localPath", "~/Vaults")).trim() || "~/Vaults"
-  readonly property int refreshIntervalSec: Math.max(30, Number(setting("refreshIntervalSec", 300)) || 300)
+
+  // Settings come from this widget's shell.json entry, falling back to the
+  // copy in ~/.config/omavaults/config.json. Disabling a widget deletes its
+  // shell.json entry, so the copy is what a re-enabled widget recovers from.
+  readonly property string savedConfigPath: (Quickshell.env("XDG_CONFIG_HOME") || Quickshell.env("HOME") + "/.config") + "/omavaults/config.json"
+  property var savedConfig: ({})
+  property bool savedConfigLoaded: false
+
+  function configValue(name, fallback) {
+    var inline = setting(name, "")
+    if (inline !== "") return inline
+    var saved = savedConfig ? savedConfig[name] : undefined
+    return saved === undefined || saved === null || saved === "" ? fallback : saved
+  }
+
+  readonly property string repoUrl: String(configValue("repoUrl", "")).trim()
+  readonly property string localPath: String(configValue("localPath", "~/Vaults")).trim() || "~/Vaults"
+  readonly property int refreshIntervalSec: Math.max(30, Number(configValue("refreshIntervalSec", 300)) || 300)
 
   property var repo: ({ cloned: false, vaults: [] })
   readonly property var vaults: repo && repo.vaults ? repo.vaults : []
@@ -78,10 +93,19 @@ BarWidget {
   function openVault(name) { restartVault = ""; run("open", name, ["open", localPath, name], "Opening " + name + "…") }
   function restartAndOpen(name) { restartVault = ""; run("open", name, ["open", "--restart", localPath, name], "Restarting Obsidian to add " + name + "…") }
 
+  // Keep the file copy in step with the effective settings. Cheap no-op when
+  // they already match, so every per-monitor instance can call it.
+  function persistConfig(url, path) {
+    if (!savedConfigLoaded || url === "") return
+    if (savedConfig.repoUrl === url && savedConfig.localPath === path && Number(savedConfig.refreshIntervalSec) === refreshIntervalSec) return
+    Quickshell.execDetached([helperPath, "config-save", url, path, String(refreshIntervalSec)])
+  }
+
   function saveSettings(url, path) {
+    persistConfig(String(url).trim(), String(path).trim() || "~/Vaults")
     if (!root.bar || !root.bar.shell || typeof root.bar.shell.updateEntryInline !== "function") {
-      errorMessage = "This Omarchy version cannot save widget settings from the panel"
-      return false
+      statusMessage = "Saved"
+      return true
     }
     var entry = { id: root.moduleName }
     for (var key in root.settings) if (key !== "id") entry[key] = root.settings[key]
@@ -101,8 +125,25 @@ BarWidget {
   }
 
   Component.onCompleted: refresh()
-  onRepoUrlChanged: refresh()
-  onLocalPathChanged: refresh()
+  onRepoUrlChanged: { refresh(); persistConfig(repoUrl, localPath) }
+  onLocalPathChanged: { refresh(); persistConfig(repoUrl, localPath) }
+  onSavedConfigLoadedChanged: persistConfig(repoUrl, localPath)
+
+  FileView {
+    id: savedConfigFile
+    path: root.savedConfigPath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      root.savedConfig = root.parse(text()) || {}
+      root.savedConfigLoaded = true
+    }
+    onLoadFailed: {
+      root.savedConfig = {}
+      root.savedConfigLoaded = true
+    }
+  }
 
   // Local status (dirty files) every minute; network fetch on the configured
   // interval.

@@ -121,6 +121,13 @@ check "create offline says not pushed" grep -q "not pushed" <<<"$out"
 check "offline vault committed locally" test -n "$(git -C "$T/local" log --oneline -1 -- Offline)"
 git -C "$T/local" remote set-url origin "$T/remote.git"
 
+# Settings copy outside shell.json.
+CFG="$XDG_CONFIG_HOME/omavaults/config.json"
+check "config-save writes file" "$HELPER" config-save "https://example.com/v.git" "~/Vaults" 120 >/dev/null
+check "config-save content" test "$(jq -c . "$CFG")" = '{"repoUrl":"https://example.com/v.git","localPath":"~/Vaults","refreshIntervalSec":120}'
+check "config-save requires url" bash -c "! '$HELPER' config-save '' '~/Vaults' >/dev/null"
+check "config-save rejects bad interval" bash -c "! '$HELPER' config-save u p soon >/dev/null"
+
 echo
 echo "$pass passed, $failed failed"
 (( failed == 0 ))

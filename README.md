@@ -30,7 +30,10 @@ scripts/dev-install.sh
 Then click the notebook icon in the bar, enter the repository URL and a local
 folder (default `~/Vaults`), **Save**, and **Clone repository**.
 
-Settings live in the widget's entry in `~/.config/omarchy/shell.json`:
+Settings live in the widget's entry in `~/.config/omarchy/shell.json`, with a
+copy in `~/.config/omavaults/config.json`. The `shell.json` entry wins when
+present; the copy is used when it's missing, e.g. after disabling and
+re-enabling the widget (which resets its `shell.json` entry):
 
 ```json
 { "id": "io.github.ramoncardena.omavaults",
@@ -127,8 +130,8 @@ the source before installing. What it does:
 - **Writes**: the configured local folder (your vaults repo) and new vault
   folders inside it; `~/.config/obsidian/obsidian.json`, where vault entries
   are added in Obsidian's own format and only while Obsidian is not running;
-  its own widget entry in `~/.config/omarchy/shell.json` when you save
-  settings.
+  its own widget entry in `~/.config/omarchy/shell.json` and
+  `~/.config/omavaults/config.json` when you save settings.
 - **Git**: commits with your configured git identity. It never force-pushes
   or rewrites published history; a conflicting rebase is aborted.
 - **Processes**: launches Obsidian through `xdg-open`. It quits Obsidian
@@ -141,10 +144,9 @@ the source before installing. What it does:
 omarchy plugin remove io.github.ramoncardena.omavaults --yes
 ```
 
-Removing the plugin leaves your vaults folder and the `obsidian.json` entries
-in place. Remove those yourself if you no longer want them. Disabling the
-widget drops its `shell.json` entry, so note your repository URL first if you
-plan to re-enable it later.
+Removing the plugin leaves your vaults folder, the `obsidian.json` entries,
+and `~/.config/omavaults/` in place, so a reinstall picks up where you left
+off. Remove those yourself if you no longer want them.
 
 ## Development
 

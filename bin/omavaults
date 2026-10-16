@@ -12,6 +12,8 @@
 #                                        last fetch is under N seconds old
 #   omavaults sync   <dir> [vault]       commit, pull --rebase, push
 #   omavaults create <dir> <name>        new vault folder, committed and pushed
+#   omavaults config-save <url> <dir> [interval]
+#                                        persist settings outside shell.json
 #   omavaults open   [--restart] <dir> <vault>
 #                                        register the vault and open it in Obsidian;
 #                                        exits 3 with needsRestart if Obsidian must restart
@@ -32,6 +34,9 @@ if [[ -z ${SSH_AUTH_SOCK:-} && -S ${XDG_RUNTIME_DIR:-/run/user/$UID}/ssh-agent.s
 fi
 
 OBSIDIAN_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/obsidian/obsidian.json"
+# Disabling a widget drops its shell.json entry, settings included; this copy
+# lets a re-enabled widget pick its configuration back up.
+OMAVAULTS_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omavaults/config.json"
 
 fail() {
   jq -cn --arg error "$*" '{ok: false, error: $error}'
@@ -273,6 +278,23 @@ cmd_create() {
   with_lock "$dir" do_create "$dir" "$name"
 }
 
+cmd_config_save() {
+  local url="${1:-}" path="${2:-}" interval="${3:-300}" tmp
+  [[ -n $url ]] || fail "no repository URL given"
+  [[ -n $path ]] || fail "no local path given"
+  [[ $interval =~ ^[0-9]+$ ]] || fail "interval must be a number of seconds"
+  mkdir -p "$(dirname "$OMAVAULTS_CONFIG")" || fail "cannot create $(dirname "$OMAVAULTS_CONFIG")"
+  tmp=$(mktemp "$OMAVAULTS_CONFIG.XXXXXX") || fail "cannot write $OMAVAULTS_CONFIG"
+  if jq -n --arg url "$url" --arg path "$path" --argjson interval "$interval" \
+      '{repoUrl: $url, localPath: $path, refreshIntervalSec: $interval}' >"$tmp"; then
+    mv "$tmp" "$OMAVAULTS_CONFIG"
+  else
+    rm -f "$tmp"
+    fail "cannot write $OMAVAULTS_CONFIG"
+  fi
+  ok "Saved"
+}
+
 cmd_sync() {
   local dir
   expand_dir "${1:-}"
@@ -382,6 +404,7 @@ case "${1:-}" in
   fetch) shift; cmd_fetch "$@" ;;
   sync) shift; cmd_sync "$@" ;;
   create) shift; cmd_create "$@" ;;
+  config-save) shift; cmd_config_save "$@" ;;
   open) shift; cmd_open "$@" ;;
-  *) fail "usage: omavaults {status|clone|fetch|sync|create|open} ..." ;;
+  *) fail "usage: omavaults {status|clone|fetch|sync|create|open|config-save} ..." ;;
 esac
