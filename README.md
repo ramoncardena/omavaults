@@ -4,6 +4,10 @@ An Omarchy bar widget for Obsidian vaults kept in a git repository. One repo
 holds many vaults (each top-level folder is a vault); the panel shows every
 vault's sync state, syncs on demand, and opens a vault in Obsidian on click.
 
+<p align="center">
+  <img src="preview.png" alt="omaVaults panel listing five vaults with their sync states: up to date, local changes, updates available, and commits to push" width="560">
+</p>
+
 ## Requirements
 
 - Omarchy 4 (Quattro) with its bundled Quickshell plugin host
