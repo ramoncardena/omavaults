@@ -83,7 +83,12 @@ git_error() {
   local line
   line=$(printf '%s\n' "$1" | grep -m1 -E '^(fatal|error): ')
   [[ -n $line ]] || line=$(printf '%s\n' "$1" | grep -v '^\s*$' | tail -n 1)
-  printf '%s' "$line" | sed -E 's/^(fatal|error): //'
+  printf '%s' "$line" | sed -E 's/^(fatal|error): //' | redact_urls
+}
+
+# "https://user:token@host/x" -> "https://***@host/x"
+redact_urls() {
+  sed -E 's#(://)[^/@[:space:]]+@#\1***@#g'
 }
 
 # Serialize everything that mutates refs, so the periodic fetch never races a
@@ -173,7 +178,7 @@ cmd_clone() {
     fail "$dir exists and is not empty"
   fi
   mkdir -p "$(dirname "$dir")" || fail "cannot create $(dirname "$dir")"
-  out=$(git clone --quiet "$url" "$dir" 2>&1) || fail "clone failed: $(git_error "$out")"
+  out=$(git clone --quiet -- "$url" "$dir" 2>&1) || fail "clone failed: $(git_error "$out")"
   ok "Cloned into $dir"
 }
 
@@ -216,10 +221,23 @@ conflict_copy_name() {
     tag="conflict $stamp"; (( n > 1 )) && tag="$tag $n"
     candidate="$stem ($tag)$ext"
     [[ $dirpart != . ]] && candidate="$dirpart/$candidate"
-    [[ -e $dir/$candidate ]] || break
+    [[ -e $dir/$candidate || -L $dir/$candidate ]] || break
     n=$((n + 1))
   done
   printf '%s' "$candidate"
+}
+
+# True if "$dir/$rel" stays inside the repo through real directories only:
+# no component (nor the file itself) is a symlink.
+inside_repo_no_symlinks() {
+  local dir="$1" rel="$2" part current="$1"
+  [[ $rel != /* && $rel != *..* ]] || return 1
+  IFS='/' read -r -a parts <<<"$rel"
+  for part in "${parts[@]}"; do
+    current="$current/$part"
+    [[ -L $current ]] && return 1
+  done
+  return 0
 }
 
 # Resolve every unmerged path of the commit being replayed. During a rebase,
@@ -236,7 +254,8 @@ resolve_conflicts_with_copies() {
         # note refresh it, so it ends up holding the latest local version.
         copy="${COPY_FOR[$path]:-}"
         [[ -n $copy ]] || copy=$(conflict_copy_name "$dir" "$path" "$stamp")
-        mkdir -p "$dir/$(dirname -- "$copy")"
+        inside_repo_no_symlinks "$dir" "$copy" || return 1
+        mkdir -p "$dir/$(dirname -- "$copy")" || return 1
         git -C "$dir" cat-file -p ":3:$path" >"$dir/$copy" || return 1
         git -C "$dir" checkout --ours -- "$path" || return 1
         git -C "$dir" add -- "$path" "$copy" || return 1
@@ -311,11 +330,11 @@ do_sync() {
   out=$(git -C "$dir" fetch --quiet --prune origin 2>&1) || fail "fetch failed: $(git_error "$out")"
   if has_upstream "$dir" && [[ -n $(git -C "$dir" rev-list -1 'HEAD..@{u}') ]]; then
     rebase_with_conflict_copies "$dir" \
-      || fail "local and remote edits could not be combined automatically; your changes are committed locally but not pushed. Resolve with: cd \"$dir\" && git pull --rebase"
+      || fail "local and remote edits could not be combined automatically; your changes are committed locally but not pushed. To finish by hand, pull with rebase in $dir and resolve the conflicting files."
   fi
   # A failed autostash re-apply leaves the stash in place rather than losing it.
   (( $(git -C "$dir" stash list | wc -l) > stashes_before )) \
-    && fail "synced, but uncommitted changes in other vaults could not be re-applied; they are safe in: cd \"$dir\" && git stash list"
+    && fail "synced, but uncommitted changes in other vaults could not be re-applied; they are kept in the git stash of $dir."
 
   # 3. Publish.
   if has_upstream "$dir"; then
@@ -561,7 +580,7 @@ cmd_config_save() {
     filter=$(jq -cn --arg url "$url" --arg path "$path" --argjson interval "$interval" \
       '{repoUrl: $url, localPath: $path, refreshIntervalSec: $interval}')
   fi
-  mkdir -p "$(dirname "$OMAVAULTS_CONFIG")" || fail "cannot create $(dirname "$OMAVAULTS_CONFIG")"
+  mkdir -p -m 700 "$(dirname "$OMAVAULTS_CONFIG")" || fail "cannot create $(dirname "$OMAVAULTS_CONFIG")"
   tmp=$(mktemp "$OMAVAULTS_CONFIG.XXXXXX") || fail "cannot write $OMAVAULTS_CONFIG"
   if jq -n --argjson cur "$current" --argjson set "$filter" '$cur + $set' >"$tmp"; then
     mv "$tmp" "$OMAVAULTS_CONFIG"
@@ -609,7 +628,7 @@ cmd_visibility() {
 
   # Cache definite answers only, so a network blip is retried next time.
   if [[ $visibility != unknown ]]; then
-    mkdir -p "$(dirname "$VISIBILITY_CACHE")"
+    mkdir -p -m 700 "$(dirname "$VISIBILITY_CACHE")"
     local tmp
     tmp=$(mktemp "$VISIBILITY_CACHE.XXXXXX") && \
       jq -n --argjson cur "$cache" --arg s "$slug" --arg v "$visibility" --argjson now "$now" \
@@ -631,9 +650,21 @@ cmd_sync() {
 # back). So the file is only ever written while Obsidian is not running.
 
 obsidian_pid() {
-  # The Electron main process (renderers carry --type=).
-  pgrep -f -- '[/ ]obsidian(/app\.asar|$| )' 2>/dev/null | while read -r pid; do
-    grep -qa -- '--type=' "/proc/$pid/cmdline" 2>/dev/null || { echo "$pid"; break; }
+  # The Electron main process: started as an `obsidian` binary (packaged,
+  # AppImage, Flatpak) or as electron running obsidian's app.asar. Renderers
+  # carry --type=. Never match this script or its parent.
+  local pid argv0 args
+  for pid in $(pgrep -f -i -- 'obsidian' 2>/dev/null); do
+    [[ $pid == "$$" || $pid == "$PPID" ]] && continue
+    [[ -r /proc/$pid/cmdline ]] || continue
+    args=$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null)
+    grep -qx -- '--type=.*' <<<"$args" && continue
+    argv0=$(head -n 1 <<<"$args")
+    if [[ $(basename -- "$argv0") =~ ^[Oo]bsidian$ ]] \
+      || grep -qE '/obsidian/(app|obsidian)\.asar$' <<<"$args"; then
+      echo "$pid"
+      return
+    fi
   done
 }
 

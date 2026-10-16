@@ -30,7 +30,7 @@ For local development, copy the working tree into the plugins folder (the
 shell rejects symlinks) and enable it:
 
 ```bash
-scripts/dev-install.sh
+scripts/dev-sync.sh
 ```
 
 Then click the notebook icon in the bar, enter the repository URL and a local
@@ -226,6 +226,19 @@ the source before installing. What it does:
 - **Processes**: launches Obsidian through `xdg-open`. It quits Obsidian
   (`SIGTERM`, a normal shutdown) only after you confirm the restart prompt.
 - No root, no services, no background daemons beyond the shell itself.
+
+**Who you let push to the repository matters.** Each vault's `.obsidian/`
+folder is synced, including community plugins, and Obsidian runs plugin code.
+Anyone with write access to the vaults repository (another device, a
+collaborator, a bot token) can therefore change what runs in Obsidian on all
+your devices. Give write access only to devices and people you trust with
+that, and prefer read-only or narrowly scoped tokens for automation.
+
+Keep credentials out of the repository URL (`https://user:token@…`): Omarchy
+stores widget settings in `~/.config/omarchy/shell.json`, which other local
+users can read. Use a git credential helper instead (for example
+`gh auth setup-git`); omaVaults also masks any credentials it finds in URLs
+in its panel and error messages.
 
 ## Remove
 

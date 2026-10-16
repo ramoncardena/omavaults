@@ -17,6 +17,11 @@ function stateGlyph(state) {
   }
 }
 
+// Hide credentials embedded in a URL: https://user:token@host/x -> https://***@host/x
+function redactUrl(url) {
+  return String(url || "").replace(/(:\/\/)[^\/@\s]+@/g, "$1***@")
+}
+
 function hostName(host) {
   switch (host) {
     case "github.com": return "GitHub"

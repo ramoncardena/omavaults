@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.ramoncardena.omavaults",
   "name": "omaVaults",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": "Ramon Cardena",
   "license": "MIT",
   "description": "Obsidian vaults from a git repo in the Omarchy bar: see each vault's sync state, sync on demand, and open it in Obsidian.",

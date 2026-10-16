@@ -22,10 +22,11 @@ cat >"$T/stub/xdg-open" <<EOF
 #!/bin/bash
 echo "\$1" >>"$T/opened"
 EOF
-# "Obsidian running" is simulated by the existence of \$T/running.
+# "Obsidian running" is simulated by a real stand-in process named obsidian
+# whose pid is stored in \$T/running; pgrep only ever reports that pid.
 cat >"$T/stub/pgrep" <<EOF
 #!/bin/bash
-[[ -f "$T/running" ]] && echo \$\$
+[[ -f "$T/running" ]] && cat "$T/running"
 exit 0
 EOF
 # curl answers with $FAKE_HTTP_CODE and logs each request; never the network.
@@ -151,7 +152,10 @@ check "status pre-registers vaults when Obsidian is stopped" \
 check "open launches URI" grep -q "obsidian://open?path=.*Work" "$T/opened"
 
 mkdir "$T/local/Research"
-touch "$T/running"
+start_fake_obsidian() { (exec -a obsidian sleep 300) & echo $! >"$T/running"; }
+stop_fake_obsidian() { [[ -f "$T/running" ]] && kill "$(cat "$T/running")" 2>/dev/null; rm -f "$T/running"; }
+trap 'stop_fake_obsidian; rm -rf "$T"' EXIT
+start_fake_obsidian
 before=$(md5sum <"$OBS")
 "$HELPER" status "$T/local" >/dev/null
 check "status leaves obsidian.json alone while running" test "$before" = "$(md5sum <"$OBS")"
@@ -160,7 +164,7 @@ check "unregistered vault while running -> exit 3" test $? -eq 3
 check "no write while running" test "$before" = "$(md5sum <"$OBS")"
 
 # Creating vaults.
-rm -f "$T/running"
+stop_fake_obsidian
 git -C "$T/local" reset -q --hard '@{u}'   # clear the earlier conflict scenario
 check "create vault" "$HELPER" create "$T/local" "  Garden Notes " >/dev/null
 check "create trims name" test -d "$T/local/Garden Notes/.obsidian"
@@ -249,6 +253,49 @@ check "request does not follow redirects" grep -q -- "--max-redirs 0" "$T/curl.l
 "$HELPER" config-save "https://github.com/a/public.git" "~/V" 300 >/dev/null
 check "settings save keeps the public acknowledgement" test "$(jq -r .publicAcknowledged "$CFG")" = "https://github.com/a/public.git"
 check "settings save updates the path" test "$(jq -r .localPath "$CFG")" = "~/V"
+
+# Security hardening.
+# A clone URL that looks like an option must not be parsed as one.
+check "option-like clone URL is not an option" bash -c "! '$HELPER' clone '--upload-pack=touch $T/pwned' '$T/optclone' >/dev/null; [[ ! -e '$T/pwned' ]]"
+
+# Credentials in URLs are never echoed back.
+out=$("$HELPER" clone "https://user:s3cr3t@127.0.0.1:9/x/y.git" "$T/credclone")
+check "clone errors hide URL credentials" bash -c "! grep -q s3cr3t <<<'$out'"
+
+# Obsidian detection: a live process that merely mentions obsidian in its
+# arguments (matched by the old pattern) is ignored; one named obsidian counts.
+detect() { PATH="/usr/bin:$PATH" bash -c 'source <(sed -n "/^obsidian_pid()/,/^}/p" "$1"); obsidian_pid' _ "$HELPER"; }
+bash -c 'sleep 300; :' decoy "/home/x/obsidian notes" & decoy=$!
+sleep 0.3
+check "decoy is alive for the test" kill -0 "$decoy"
+check "decoy mentioning obsidian is not Obsidian" bash -c "[[ \"\$(PATH=/usr/bin:\$PATH bash -c 'source <(sed -n \"/^obsidian_pid()/,/^}/p\" \"$HELPER\"); obsidian_pid')\" != $decoy ]]"
+kill "$decoy" 2>/dev/null
+(exec -a obsidian sleep 300) & standin=$!
+sleep 0.3
+check "a process named obsidian is detected" test "$(detect)" = "$standin"
+kill "$standin" 2>/dev/null
+
+# Conflict copies never write through a symlink in the repo.
+(cd "$T/other" && git pull -q && mkdir -p Work/sub && echo base >Work/sub/n.md && git add -A && git commit -qm sub && git push -q)
+"$HELPER" sync "$T/local" Work >/dev/null
+mkdir -p "$T/outside-target"
+(cd "$T/other" && echo "remote" >Work/sub/n.md && git commit -qam r && git push -q)
+echo "local" >"$T/local/Work/sub/n.md"
+# Plant a symlink where the copy would go (as if pulled from the repo).
+stamp_glob="$T/local/Work/sub/n (conflict "
+ln -s "$T/outside-target/evil.md" "$T/local/Work/sub/n (conflict $(hostname) $(date '+%Y-%m-%d %H%M')).md"
+out=$("$HELPER" sync "$T/local" Work)
+check "copy avoids a symlinked name" bash -c "[[ ! -s '$T/outside-target/evil.md' ]]"
+check "sync still succeeds beside the symlink" test "$(jq -r .ok <<<"$out")" = true
+rm -f "$T/local/Work/sub/"*conflict*; "$HELPER" sync "$T/local" Work >/dev/null; (cd "$T/other" && git pull -q)
+
+# A symlinked directory on the copy's path aborts cleanly instead.
+(cd "$T/other" && echo base >Work/sub/m.md && git add -A && git commit -qm m && git push -q)
+"$HELPER" sync "$T/local" Work >/dev/null
+(cd "$T/other" && echo "remote" >Work/sub/m.md && git commit -qam rm && git push -q)
+echo "local" >"$T/local/Work/sub/m.md"
+check "symlink guard rejects symlinked folders" bash -c "source <(sed -n '/^inside_repo_no_symlinks()/,/^}/p' '$HELPER'); mkdir -p '$T/g/real'; ln -sfn '$T/outside-target' '$T/g/link'; ! inside_repo_no_symlinks '$T/g' 'link/x.md' && inside_repo_no_symlinks '$T/g' 'real/x.md' && ! inside_repo_no_symlinks '$T/g' '../x.md'"
+"$HELPER" sync "$T/local" Work >/dev/null; (cd "$T/other" && git pull -q)
 
 echo
 echo "$pass passed, $failed failed"

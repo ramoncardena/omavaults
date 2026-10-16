@@ -377,7 +377,7 @@ Panel {
             Text {
               width: parent.width
               textFormat: Text.PlainText
-              text: root.host.repoUrl + "\n→ " + root.host.localPath
+              text: Model.redactUrl(root.host.repoUrl) + "\n→ " + root.host.localPath
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
