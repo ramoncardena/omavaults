@@ -39,7 +39,7 @@ BarWidget {
   property var repo: ({ cloned: false, vaults: [] })
   readonly property var vaults: repo && repo.vaults ? repo.vaults : []
   property bool loaded: false
-  property string busyAction: ""    // "", "clone", "fetch", "sync", "create", "import", "open"
+  property string busyAction: ""    // "", "clone", "fetch", "sync", "create", "import", "register", "open"
   property string busyVault: ""     // vault being acted on; "" means all
   property string statusMessage: ""
   property string errorMessage: ""
@@ -48,6 +48,18 @@ BarWidget {
   property var candidates: []       // Obsidian vaults outside the repo, for import
   property string repoVisibility: "" // "public" | "private" | "unknown" | "" (not checked)
   property string repoHost: ""
+  // Repo vaults missing from Obsidian's vault list. Offered once per set:
+  // "Not now" remembers the names, so only a newly missing vault asks again.
+  readonly property var missingVaults: vaults.filter(function(v) { return v.inObsidian === false })
+    .map(function(v) { return v.name })
+  readonly property var dismissedVaults: {
+    var all = savedConfig && savedConfig.registerDismissed ? savedConfig.registerDismissed : {}
+    var list = all[repoUrl]
+    return Array.isArray(list) ? list : []
+  }
+  // Missing vaults the user hasn't declined: what the prompt offers and adds.
+  readonly property var pendingVaults: missingVaults.filter(function(n) { return dismissedVaults.indexOf(n) < 0 })
+  readonly property bool registerPrompt: configured && repo.cloned && pendingVaults.length > 0
   readonly property bool publicWarning: configured && repoVisibility === "public"
     && String(savedConfig.publicAcknowledged || "") !== repoUrl
   property bool picking: false      // folder chooser open; the panel is hidden meanwhile
@@ -124,6 +136,27 @@ BarWidget {
     next.publicAcknowledged = repoUrl
     savedConfig = next   // hide the banner now; the file write follows
     Quickshell.execDetached([helperPath, "config-save", "--ack-public", repoUrl])
+  }
+  function registerVaults() {
+    var restart = repo.obsidianRunning === true
+    var names = pendingVaults.slice()
+    var n = names.length
+    if (n === 0) return
+    run("register", "", (restart ? ["register", "--restart", localPath] : ["register", localPath]).concat(names),
+      (restart ? "Restarting Obsidian to add " : "Adding ") + n + (n === 1 ? " vault" : " vaults") + " to Obsidian…")
+  }
+  function dismissRegister() {
+    // Add to the declined set, so earlier "Not now" answers are kept.
+    var names = dismissedVaults.concat(pendingVaults.filter(function(n) { return dismissedVaults.indexOf(n) < 0 }))
+    var next = {}
+    for (var k in savedConfig) next[k] = savedConfig[k]
+    var all = {}
+    var prev = savedConfig.registerDismissed || {}
+    for (var u in prev) all[u] = prev[u]
+    all[repoUrl] = names
+    next.registerDismissed = all
+    savedConfig = next   // hide the prompt now; the file write follows
+    Quickshell.execDetached([helperPath, "config-save", "--dismiss-register", repoUrl, JSON.stringify(names)])
   }
   function loadCandidates() {
     if (!configured || !repo.cloned || candidatesProc.running) return
@@ -268,6 +301,10 @@ BarWidget {
             "Kept your version beside the synced one: " + result.conflictCopies.join(", ") + ". Merge them, then delete the copy."])
         if (action === "open") root.close()
         if (action === "create" || action === "import") Qt.callLater(function() { root.openVault(vault) })
+      } else if (result && result.needsRestart && action === "register") {
+        // Obsidian started since the last status check; the refresh below
+        // turns the button into "Restart Obsidian and add".
+        root.statusMessage = "Obsidian is running; it needs a restart to pick up new vaults"
       } else if (result && result.needsRestart) {
         root.statusMessage = ""
         root.restartVault = result.vault

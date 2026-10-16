@@ -3,6 +3,18 @@
 All notable changes to omaVaults. Versions follow the `version` field in
 `manifest.json`; each release is tagged `v<version>`.
 
+## 0.5.2 — 2026-10-16
+
+### Changed
+- omaVaults no longer adds vaults to Obsidian's vault list on its own. The
+  panel asks instead (**Add to Obsidian** / **Restart Obsidian and add**), and
+  **Not now** is remembered per vault, so vaults you removed from Obsidian stay
+  removed. Opening a vault from the panel still adds that one vault.
+- Status is read-only and reports which vaults are missing from Obsidian's list.
+
+### Added
+- `register [--restart] <dir> [vault...]` helper command.
+
 ## 0.5.1 — 2026-10-16
 
 ### Security

@@ -19,6 +19,9 @@
 #   omavaults visibility <url>           public / private / unknown (anonymous API check)
 #   omavaults config-save <url> <dir> [interval]
 #                                        persist settings outside shell.json
+#   omavaults register [--restart] <dir> [vault...]
+#                                        add repo vaults (all, or the named ones) to Obsidian's list;
+#                                        exits 3 with needsRestart if Obsidian runs
 #   omavaults open   [--restart] <dir> <vault>
 #                                        register the vault and open it in Obsidian;
 #                                        exits 3 with needsRestart if Obsidian must restart
@@ -125,7 +128,7 @@ cmd_status() {
     read -r ahead behind < <(git -C "$dir" rev-list --left-right --count 'HEAD...@{u}' 2>/dev/null || echo "0 0")
   fi
 
-  local vaults_json="[]" name path dirty v_ahead v_behind conflicts state last_commit copies
+  local vaults_json="[]" name path dirty v_ahead v_behind conflicts state last_commit copies in_obsidian
   while IFS= read -r -d '' path; do
     name=$(basename "$path")
     dirty=$(git -C "$dir" status --porcelain --untracked-files=all -- "$name" 2>/dev/null | wc -l)
@@ -150,23 +153,32 @@ cmd_status() {
     # Conflict copies need a human; flag a vault that is otherwise clean.
     (( copies > 0 )) && [[ $state == synced || $state == unpublished ]] && state="copies"
 
+    in_obsidian=false
+    is_registered "$(realpath "$path")" && in_obsidian=true
+
     vaults_json=$(jq -c \
       --arg name "$name" --arg path "$path" --arg state "$state" \
       --argjson dirty "$dirty" --argjson ahead "$v_ahead" --argjson behind "$v_behind" \
       --argjson lastCommit "${last_commit:-0}" --argjson copies "$copies" \
-      '. + [{name: $name, path: $path, state: $state, dirty: $dirty, ahead: $ahead, behind: $behind, lastCommit: $lastCommit, conflictCopies: $copies}]' \
+      --argjson inObsidian "$in_obsidian" \
+      '. + [{name: $name, path: $path, state: $state, dirty: $dirty, ahead: $ahead, behind: $behind, lastCommit: $lastCommit, conflictCopies: $copies, inObsidian: $inObsidian}]' \
       <<<"$vaults_json")
   done < <(find "$dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0 | sort -z)
 
-  register_repo_vaults "$dir"
+  # Read-only: Obsidian's vault list is changed only by `register` and `open`,
+  # i.e. when the user asks.
+  local obsidian_running=false
+  [[ -n $(obsidian_pid) ]] && obsidian_running=true
 
   jq -cn \
     --arg dir "$dir" --arg branch "$branch" --arg remote "$remote_url" \
+    --argjson obsidianRunning "$obsidian_running" \
     --argjson upstream "$upstream" --argjson ahead "${ahead:-0}" --argjson behind "${behind:-0}" \
     --argjson rebasing "$rebasing" --argjson lastFetch "$last_fetch" \
     --argjson vaults "$vaults_json" \
     '{ok: true, cloned: true, dir: $dir, remote: $remote, branch: $branch, upstream: $upstream,
-      ahead: $ahead, behind: $behind, rebasing: $rebasing, lastFetch: $lastFetch, vaults: $vaults}'
+      ahead: $ahead, behind: $behind, rebasing: $rebasing, lastFetch: $lastFetch,
+      obsidianRunning: $obsidianRunning, vaults: $vaults}'
 }
 
 cmd_clone() {
@@ -566,12 +578,20 @@ cmd_pick_folder() {
 # Updates the plugin's own settings file, keeping keys it isn't told about.
 #   config-save <url> <dir> [interval]   repository settings
 #   config-save --ack-public <url>       "this public repo is meant to be public"
+#   config-save --dismiss-register <url> <names-json>
+#                                        "don't offer to add these vaults to Obsidian"
 cmd_config_save() {
   local filter tmp current='{}'
   [[ -s $OMAVAULTS_CONFIG ]] && current=$(jq -c 'if type == "object" then . else {} end' "$OMAVAULTS_CONFIG" 2>/dev/null || echo '{}')
   if [[ ${1:-} == --ack-public ]]; then
     [[ -n ${2:-} ]] || fail "no repository URL given"
     filter=$(jq -cn --arg url "$2" '{publicAcknowledged: $url}')
+  elif [[ ${1:-} == --dismiss-register ]]; then
+    [[ -n ${2:-} ]] || fail "no repository URL given"
+    jq -e 'type == "array" and all(.[]; type == "string")' <<<"${3:-}" >/dev/null 2>&1 \
+      || fail "vault names must be a JSON array of strings"
+    filter=$(jq -cn --argjson cur "$current" --arg url "$2" --argjson names "$3" \
+      '{registerDismissed: (($cur.registerDismissed // {}) + {($url): $names})}')
   else
     local url="${1:-}" path="${2:-}" interval="${3:-300}"
     [[ -n $url ]] || fail "no repository URL given"
@@ -700,15 +720,44 @@ register_vaults() {
   fi
 }
 
-# Pre-register the repo's vaults whenever it is safe, so clicking one later
-# never needs an Obsidian restart.
-register_repo_vaults() {
-  local dir="$1" paths=() path
-  [[ -n $(obsidian_pid) ]] && return 0
-  while IFS= read -r -d '' path; do paths+=("$(realpath "$path")"); done \
-    < <(find "$dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0)
-  (( ${#paths[@]} )) && register_vaults "${paths[@]}" 2>/dev/null
-  return 0
+# Add every repo vault missing from Obsidian's list — only when the user asks
+# (the panel's "Add to Obsidian"). With --restart, a running Obsidian is quit
+# cleanly first and started again afterwards.
+cmd_register() {
+  local dir restart=false paths=() path running=false name
+  if [[ ${1:-} == --restart ]]; then restart=true; shift; fi
+  expand_dir "${1:-}"
+  shift
+  in_repo "$dir" || fail "not cloned yet"
+  if (( $# )); then
+    for name in "$@"; do
+      valid_vault "$name" || fail "invalid vault name: $name"
+      path=$(realpath -e "$dir/$name" 2>/dev/null) || fail "vault not found: $name"
+      is_registered "$path" || paths+=("$path")
+    done
+  else
+    while IFS= read -r -d '' path; do
+      path=$(realpath "$path")
+      is_registered "$path" || paths+=("$path")
+    done < <(find "$dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0 | sort -z)
+  fi
+  (( ${#paths[@]} )) || ok "All vaults are already in Obsidian"
+
+  if [[ -n $(obsidian_pid) ]]; then
+    $restart || {
+      jq -cn --argjson n "${#paths[@]}" \
+        '{ok: false, needsRestart: true, error: "Obsidian must restart to add the vaults"}'
+      exit 3
+    }
+    stop_obsidian
+    running=true
+  fi
+  register_vaults "${paths[@]}"
+  if $running; then
+    setsid -f xdg-open "obsidian://open" >/dev/null 2>&1 </dev/null
+  fi
+  jq -cn --argjson n "${#paths[@]}" \
+    '{ok: true, registered: $n, message: ("Added " + ($n | tostring) + (if $n == 1 then " vault" else " vaults" end) + " to Obsidian")}'
 }
 
 stop_obsidian() {
@@ -764,5 +813,6 @@ case "${1:-}" in
   config-save) shift; cmd_config_save "$@" ;;
   visibility) shift; cmd_visibility "$@" ;;
   open) shift; cmd_open "$@" ;;
-  *) fail "usage: omavaults {status|clone|fetch|sync|create|import|candidates|pick-folder|open|config-save|visibility} ..." ;;
+  register) shift; cmd_register "$@" ;;
+  *) fail "usage: omavaults {status|clone|fetch|sync|create|import|candidates|pick-folder|register|open|config-save|visibility} ..." ;;
 esac

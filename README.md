@@ -186,11 +186,18 @@ omarchy-shell io.github.ramoncardena.omavaults refresh
 
 Obsidian only opens vaults listed in `~/.config/obsidian/obsidian.json`, and
 only reads that file at startup (a running instance rewrites it from memory).
-So omaVaults:
+omaVaults changes that list only when you ask, and never behind
+Obsidian's back:
 
-- writes `obsidian.json` **only while Obsidian is not running**, and
-  pre-registers all repo vaults whenever that's the case;
-- if you open a vault Obsidian doesn't know yet while it's running, asks to
+- **Opening a vault** from the panel adds that vault to the list.
+- When repo vaults are missing from the list, the panel **asks** whether to
+  add them (**Add to Obsidian**, or **Restart Obsidian and add** while it's
+  running). **Not now** is remembered for those vaults, so you're only asked
+  again when a new one appears, and vaults you removed from Obsidian on
+  purpose stay removed.
+- It writes `obsidian.json` only while Obsidian is not running, adds entries in
+  Obsidian's own format, and never edits or removes existing ones.
+- If you open a vault Obsidian doesn't know yet while it's running, it asks to
   restart Obsidian once (`Enter` confirms), then opens the vault.
 
 <p align="center">
@@ -217,7 +224,8 @@ the source before installing. What it does:
   vault list in `~/.config/obsidian/obsidian.json`.
 - **Writes**: the configured local folder (your vaults repo) and new vault
   folders inside it; `~/.config/obsidian/obsidian.json`, where vault entries
-  are added in Obsidian's own format and only while Obsidian is not running;
+  are added only when you open a vault or choose **Add to Obsidian**, only
+  while Obsidian is not running, and existing entries are never changed;
   its own widget entry in `~/.config/omarchy/shell.json` and
   `~/.config/omavaults/config.json` when you save settings.
 - **Git**: commits with your configured git identity. It never force-pushes

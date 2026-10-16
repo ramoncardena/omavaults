@@ -28,7 +28,7 @@ Panel {
     loaded: false, busy: false, busyAction: "", busyVault: "", statusMessage: "",
     errorMessage: "", restartVault: "", configured: false, hasConflict: false,
     attentionCount: 0, summary: "", now: 0, candidates: [], picking: false, pickedFolder: "",
-    publicWarning: false, repoHost: ""
+    publicWarning: false, repoHost: "", registerPrompt: false, pendingVaults: []
   })
 
   readonly property color foreground: root.barForeground
@@ -289,6 +289,45 @@ Panel {
                 acceptText: "Keep it public"
                 showCancel: false
                 onAccepted: root.hostWidget.acknowledgePublic()
+              }
+            }
+          }
+
+          // ---- offer: add repo vaults to Obsidian's vault list (never automatic)
+          CursorSurface {
+            visible: root.host.registerPrompt && !setup.editing
+            width: parent.width
+            bordered: true
+            foreground: root.foreground
+            implicitHeight: registerColumn.implicitHeight + Style.spacing.rowPaddingX * 2
+
+            Column {
+              id: registerColumn
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.margins: Style.space(10)
+              spacing: Style.space(8)
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: {
+                  var n = root.host.pendingVaults.length
+                  return (n === 1 ? "1 vault isn't" : n + " vaults aren't") + " in Obsidian's vault list yet: "
+                    + root.host.pendingVaults.join(", ") + ". Add "
+                    + (n === 1 ? "it" : "them") + " so " + (n === 1 ? "it shows" : "they show") + " up in Obsidian's vault switcher?"
+                }
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              FormActions {
+                acceptText: root.host.repo.obsidianRunning ? "Restart Obsidian and add" : "Add to Obsidian"
+                acceptEnabled: !root.host.busy
+                cancelText: "Not now"
+                onAccepted: root.hostWidget.registerVaults()
+                onCancelled: root.hostWidget.dismissRegister()
               }
             }
           }
@@ -693,6 +732,7 @@ Panel {
   component FormActions: Row {
     id: actions
     property string acceptText: "OK"
+    property string cancelText: "Cancel"
     property bool acceptEnabled: true
     property bool showCancel: true
     signal accepted()
@@ -714,7 +754,7 @@ Panel {
       id: cancelButton
       visible: actions.showCancel
       width: actions.buttonWidth
-      text: "Cancel"
+      text: actions.cancelText
       foreground: root.foreground
       fontFamily: root.fontFamily
       bordered: true

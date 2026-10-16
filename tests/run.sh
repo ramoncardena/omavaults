@@ -145,11 +145,26 @@ check "fetch --max-age rejects junk" bash -c "! '$HELPER' fetch '$T/local' --max
 check "rejects path traversal" bash -c "! '$HELPER' sync '$T/local' ../x >/dev/null"
 check "rejects bad open name" bash -c "! '$HELPER' open '$T/local' ../etc >/dev/null"
 
-# Obsidian registration.
-check "status pre-registers vaults when Obsidian is stopped" \
-  test "$(jq '[.vaults[]] | length' "$OBS")" = 2
+# Obsidian registration: only on request (register, or opening a vault).
+reg_count() { [[ -s $OBS ]] && jq '[.vaults // {} | .[]] | length' "$OBS" || echo 0; }
+"$HELPER" status "$T/local" >/dev/null
+check "status never registers vaults" test "$(reg_count)" = 0
+check "status reports vaults missing from Obsidian" \
+  test "$("$HELPER" status "$T/local" | jq -c '[.vaults[] | select(.inObsidian | not) | .name]')" = '["Personal","Work"]'
+check "status reports Obsidian not running" test "$("$HELPER" status "$T/local" | jq -r .obsidianRunning)" = false
 "$HELPER" open "$T/local" Work >/dev/null
 check "open launches URI" grep -q "obsidian://open?path=.*Work" "$T/opened"
+check "opening registers just that vault" test "$(reg_count)" = 1
+out=$("$HELPER" register "$T/local")
+check "register adds the missing vaults" test "$(jq -r .registered <<<"$out")" = 1
+check "all repo vaults now in Obsidian" test "$(reg_count)" = 2
+check "register again is a no-op" test "$("$HELPER" register "$T/local" | jq -r '.registered // 0')" = 0
+mkdir -p "$T/local/Alpha" "$T/local/Beta"
+out=$("$HELPER" register "$T/local" Beta)
+check "register with names adds only those" bash -c "[[ \$(jq -r .registered <<<'$out') == 1 ]] && jq -e '[.vaults[].path] | any(endswith(\"/Beta\"))' '$OBS' >/dev/null && ! jq -e '[.vaults[].path] | any(endswith(\"/Alpha\"))' '$OBS' >/dev/null"
+check "register rejects unknown names" bash -c "! '$HELPER' register '$T/local' Nope >/dev/null"
+check "register rejects path-like names" bash -c "! '$HELPER' register '$T/local' ../x >/dev/null"
+rm -rf "$T/local/Alpha" "$T/local/Beta"
 
 mkdir "$T/local/Research"
 start_fake_obsidian() { (exec -a obsidian sleep 300) & echo $! >"$T/running"; }
@@ -162,6 +177,15 @@ check "status leaves obsidian.json alone while running" test "$before" = "$(md5s
 "$HELPER" open "$T/local" Research >/dev/null
 check "unregistered vault while running -> exit 3" test $? -eq 3
 check "no write while running" test "$before" = "$(md5sum <"$OBS")"
+check "status reports Obsidian running" test "$("$HELPER" status "$T/local" | jq -r .obsidianRunning)" = true
+out=$("$HELPER" register "$T/local"); rc=$?
+check "register while running asks for a restart" bash -c "[[ $rc == 3 && \$(jq -r .needsRestart <<<'$out') == true ]]"
+check "register while running writes nothing" test "$before" = "$(md5sum <"$OBS")"
+: >"$T/opened"
+out=$("$HELPER" register --restart "$T/local")
+check "register --restart adds the vault" test "$(jq -r .registered <<<"$out")" = 1
+check "register --restart quit Obsidian first" bash -c "! kill -0 \$(cat '$T/running') 2>/dev/null"
+check "register --restart starts Obsidian again" grep -qx "obsidian://open" "$T/opened"
 
 # Creating vaults.
 stop_fake_obsidian
@@ -253,6 +277,11 @@ check "request does not follow redirects" grep -q -- "--max-redirs 0" "$T/curl.l
 "$HELPER" config-save "https://github.com/a/public.git" "~/V" 300 >/dev/null
 check "settings save keeps the public acknowledgement" test "$(jq -r .publicAcknowledged "$CFG")" = "https://github.com/a/public.git"
 check "settings save updates the path" test "$(jq -r .localPath "$CFG")" = "~/V"
+"$HELPER" config-save --dismiss-register "https://github.com/a/public.git" '["Work","Personal"]' >/dev/null
+check "dismissed vault set is stored per repo" \
+  test "$(jq -c '.registerDismissed["https://github.com/a/public.git"]' "$CFG")" = '["Work","Personal"]'
+check "dismissing keeps other settings" test "$(jq -r .publicAcknowledged "$CFG")" = "https://github.com/a/public.git"
+check "dismiss rejects non-list input" bash -c "! '$HELPER' config-save --dismiss-register u 'Work' >/dev/null"
 
 # Security hardening.
 # A clone URL that looks like an option must not be parsed as one.
