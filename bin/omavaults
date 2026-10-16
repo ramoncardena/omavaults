@@ -12,6 +12,9 @@
 #                                        last fetch is under N seconds old
 #   omavaults sync   <dir> [vault]       commit, pull --rebase, push
 #   omavaults create <dir> <name>        new vault folder, committed and pushed
+#   omavaults import <dir> <folder> [name]
+#                                        copy an existing vault in, commit and push
+#   omavaults candidates <dir>           Obsidian vaults outside the repo
 #   omavaults config-save <url> <dir> [interval]
 #                                        persist settings outside shell.json
 #   omavaults open   [--restart] <dir> <vault>
@@ -237,45 +240,132 @@ do_sync() {
   ok "Synced $label"
 }
 
-# A new vault: minimal Obsidian config plus a .gitignore for the per-device
-# workspace files, so opening the vault doesn't immediately mark it modified.
-do_create() {
-  local dir="$1" name="$2" path out
-  path="$dir/$name"
-  [[ -e $path ]] && fail "a vault or file named \"$name\" already exists"
-
-  mkdir -p "$path/.obsidian" || fail "cannot create $path"
-  echo '{}' >"$path/.obsidian/app.json"
-  cat >"$path/.gitignore" <<'IGNORE'
+# Per-device Obsidian state, kept out of git for every vault the plugin makes.
+write_vault_gitignore() {
+  cat >"$1/.gitignore" <<'IGNORE'
 # Per-device Obsidian state
 .obsidian/workspace.json
 .obsidian/workspace-mobile.json
 .obsidian/cache
 .trash/
 IGNORE
-  printf '# %s\n' "$name" >"$path/Welcome.md"
+}
 
-  # Sync in a subshell so a failed push still reports the vault as created.
+# Sets $name to the trimmed, validated vault name. Vault names become folder
+# names at the top of the repo.
+check_vault_name() {
+  name="${1:-}"
+  name="${name#"${name%%[![:space:]]*}"}"
+  name="${name%"${name##*[![:space:]]}"}"
+  valid_vault "$name" || fail "invalid vault name: names can't be empty, start with '.', or contain '/'"
+  [[ $name =~ [[:cntrl:]] ]] && fail "invalid vault name: control characters aren't allowed"
+  (( ${#name} <= 100 )) || fail "vault name is too long"
+}
+
+# Commit and push a freshly added vault. Runs the sync in a subshell so a
+# failed push still reports the vault as added (it is committed locally).
+publish_new_vault() {
+  local dir="$1" name="$2" verb="$3" out
   if out=$(do_sync "$dir" "$name"); then
-    ok "Created $name"
+    ok "$verb $name"
   fi
-  jq -cn --arg name "$name" --arg error "$(jq -r '.error // empty' <<<"$out" 2>/dev/null)" \
-    '{ok: true, message: ("Created " + $name + " locally; not pushed yet" + (if $error != "" then " (" + $error + ")" else "" end))}'
+  jq -cn --arg msg "$verb $name" --arg error "$(jq -r '.error // empty' <<<"$out" 2>/dev/null)" \
+    '{ok: true, message: ($msg + " locally; not pushed yet" + (if $error != "" then " (" + $error + ")" else "" end))}'
   exit 0
+}
+
+# A new vault: minimal Obsidian config plus a .gitignore for the per-device
+# workspace files, so opening the vault doesn't immediately mark it modified.
+do_create() {
+  local dir="$1" name="$2" path
+  path="$dir/$name"
+  [[ -e $path ]] && fail "a vault or file named \"$name\" already exists"
+
+  mkdir -p "$path/.obsidian" || fail "cannot create $path"
+  echo '{}' >"$path/.obsidian/app.json"
+  write_vault_gitignore "$path"
+  printf '# %s\n' "$name" >"$path/Welcome.md"
+  publish_new_vault "$dir" "$name" "Created"
 }
 
 cmd_create() {
   local dir name
   expand_dir "${1:-}"
-  name="${2:-}"
-  # Trim surrounding whitespace; vault names become folder names.
-  name="${name#"${name%%[![:space:]]*}"}"
-  name="${name%"${name##*[![:space:]]}"}"
   in_repo "$dir" || fail "not cloned yet"
-  valid_vault "$name" || fail "invalid vault name: names can't be empty, start with '.', or contain '/'"
-  [[ $name =~ [[:cntrl:]] ]] && fail "invalid vault name: control characters aren't allowed"
-  (( ${#name} <= 100 )) || fail "vault name is too long"
+  check_vault_name "${2:-}"
   with_lock "$dir" do_create "$dir" "$name"
+}
+
+# GitHub rejects files of 100 MB or more; refuse before copying anything.
+MAX_FILE_MB=95
+
+do_import() {
+  local dir="$1" src="$2" name="$3" path big
+  path="$dir/$name"
+  [[ -e $path ]] && fail "a vault or file named \"$name\" already exists"
+
+  big=$(find "$src" -type f -size +"${MAX_FILE_MB}"M ! -path '*/.git/*' -printf '%P\n' -quit 2>/dev/null)
+  [[ -z $big ]] || fail "\"$big\" is larger than ${MAX_FILE_MB} MB; git hosts reject files that big"
+
+  # The source is only read. Skip git metadata and per-device Obsidian state.
+  rsync -a --exclude='.git' --exclude='.obsidian/workspace*.json' \
+    --exclude='.obsidian/cache' --exclude='.trash/' "$src/" "$path/" \
+    || { rm -rf "$path"; fail "copy failed"; }
+  [[ -d $path/.obsidian ]] || mkdir -p "$path/.obsidian"
+  [[ -e $path/.gitignore ]] || write_vault_gitignore "$path"
+  publish_new_vault "$dir" "$name" "Imported"
+}
+
+cmd_import() {
+  local dir src name
+  expand_dir "${1:-}"
+  in_repo "$dir" || fail "not cloned yet"
+  src="${2:-}"
+  [[ $src == "~" || $src == "~/"* ]] && src="$HOME${src:1}"
+  [[ -n $src ]] || fail "no folder to import"
+  src=$(realpath -e -- "$src" 2>/dev/null) || fail "folder not found: ${2:-}"
+  [[ -d $src ]] || fail "not a folder: $src"
+  local repo_root
+  repo_root=$(realpath -e -- "$dir")
+  [[ $src == "$repo_root" || $src == "$repo_root"/* ]] && fail "that folder is already inside the vaults repo"
+  [[ $repo_root == "$src"/* ]] && fail "that folder contains the vaults repo"
+  [[ $src == "$HOME" || $src == / ]] && fail "refusing to import $src"
+  check_vault_name "${3:-$(basename "$src")}"
+  with_lock "$dir" do_import "$dir" "$src" "$name"
+}
+
+# "host/owner/repo" for comparing remotes across ssh/https spellings.
+remote_slug() {
+  printf '%s' "$1" | sed -E 's#^[a-z+]+://##; s#^[^@/]+@##; s#:#/#; s#\.git/?$##; s#/+$##' | tr '[:upper:]' '[:lower:]'
+}
+
+# Vaults Obsidian knows about that live outside the repo: import candidates.
+# A folder inside another clone of this same repo is flagged as a duplicate.
+cmd_candidates() {
+  local dir repo_root slug list="[]" path name top other files kb
+  expand_dir "${1:-}"
+  in_repo "$dir" || fail "not cloned yet"
+  repo_root=$(realpath -e -- "$dir")
+  slug=$(remote_slug "$(git -C "$dir" remote get-url origin 2>/dev/null)")
+  [[ -s $OBSIDIAN_CONFIG ]] || { jq -cn '{ok: true, candidates: []}'; return; }
+
+  while IFS= read -r path; do
+    [[ -d $path ]] || continue
+    path=$(realpath -e -- "$path") || continue
+    [[ $path == "$repo_root" || $path == "$repo_root"/* ]] && continue
+    name=$(basename "$path")
+    other=""
+    if top=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null); then
+      [[ -n $slug && $(remote_slug "$(git -C "$top" remote get-url origin 2>/dev/null)") == "$slug" ]] && other="$top"
+    fi
+    files=$(find "$path" -type f ! -path '*/.git/*' 2>/dev/null | wc -l)
+    kb=$(du -sk --exclude=.git "$path" 2>/dev/null | cut -f1)
+    list=$(jq -c --arg path "$path" --arg name "$name" --arg dup "$other" \
+      --argjson files "$files" --argjson kb "${kb:-0}" \
+      '. + [{path: $path, name: $name, files: $files, sizeKB: $kb, duplicateOf: (if $dup == "" then null else $dup end)}]' <<<"$list")
+  done < <(jq -r '(.vaults // {})[] | .path' "$OBSIDIAN_CONFIG" 2>/dev/null)
+
+  jq -cn --argjson c "$list" '{ok: true, candidates: $c}'
 }
 
 cmd_config_save() {
@@ -404,7 +494,9 @@ case "${1:-}" in
   fetch) shift; cmd_fetch "$@" ;;
   sync) shift; cmd_sync "$@" ;;
   create) shift; cmd_create "$@" ;;
+  import) shift; cmd_import "$@" ;;
+  candidates) shift; cmd_candidates "$@" ;;
   config-save) shift; cmd_config_save "$@" ;;
   open) shift; cmd_open "$@" ;;
-  *) fail "usage: omavaults {status|clone|fetch|sync|create|open|config-save} ..." ;;
+  *) fail "usage: omavaults {status|clone|fetch|sync|create|import|candidates|open|config-save} ..." ;;
 esac

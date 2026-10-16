@@ -11,7 +11,7 @@ vault's sync state, syncs on demand, and opens a vault in Obsidian on click.
 ## Requirements
 
 - Omarchy 4 (Quattro) with its bundled Quickshell plugin host
-- `git`, `jq`, `flock` and `setsid` (util-linux), `pgrep` (procps),
+- `git`, `jq`, `rsync`, `flock` and `setsid` (util-linux), `pgrep` (procps),
   `xdg-open`, and `omarchy-notification-send`; all ship with Omarchy
 - [Obsidian](https://obsidian.md) installed with the `obsidian://` URI handler
 - Non-interactive git access to your vaults repo (see *Authentication*)
@@ -66,6 +66,7 @@ in `BatchMode`, and HTTPS has terminal prompts disabled:
 | Sync all vaults | ⟳ in the header / right-click bar icon | `S` |
 | Fetch remote status | cloud button in the header | `r` |
 | Create a vault | `+` button | `n`, type a name, `Enter` |
+| Import an existing vault | import button | `i`, pick or type a folder, `Enter` |
 | Repository settings | ⚙ button | `,` |
 | Close panel | click outside | `Esc` |
 
@@ -79,6 +80,23 @@ a `Welcome.md`, and a `.gitignore` for Obsidian's per-device files
 Obsidian. If the push fails (offline, auth), the vault is still created and
 committed locally and shows as *commits to push*. Names can't start with `.`
 or contain `/`.
+
+### Importing a vault
+
+**Import** copies an existing vault folder into the repo as a new top-level
+vault, then commits, pushes, and opens the copy in Obsidian. The original is
+only read, never changed or moved; delete it yourself once you're happy with
+the copy.
+
+- The form lists the vaults Obsidian already knows about outside the repo.
+  Folders that are just another clone of this same repo are shown as
+  duplicates and can't be imported. Any other folder can be typed in.
+- The name defaults to the folder's name and must not already exist.
+- `.git`, `.obsidian/workspace*.json`, `.obsidian/cache`, and `.trash/` are
+  not copied; a per-vault `.gitignore` is added if the folder has none.
+- Imports are refused if any file is 95 MB or larger, since git hosts reject
+  files near 100 MB.
+- If the folder was its own git repo, its history is not carried over.
 
 ### Sync states
 
@@ -131,6 +149,8 @@ the source before installing. What it does:
 
 - **Network**: only `git clone`/`fetch`/`push` to the repository you
   configure. No telemetry and no other requests.
+- **Reads**: folders you choose to import (copied, never modified), and the
+  vault list in `~/.config/obsidian/obsidian.json`.
 - **Writes**: the configured local folder (your vaults repo) and new vault
   folders inside it; `~/.config/obsidian/obsidian.json`, where vault entries
   are added in Obsidian's own format and only while Obsidian is not running;

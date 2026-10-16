@@ -27,7 +27,7 @@ Panel {
     repoUrl: "", localPath: "", repo: { cloned: false, vaults: [] }, vaults: [],
     loaded: false, busy: false, busyAction: "", busyVault: "", statusMessage: "",
     errorMessage: "", restartVault: "", configured: false, hasConflict: false,
-    attentionCount: 0, summary: "", now: 0
+    attentionCount: 0, summary: "", now: 0, candidates: []
   })
 
   readonly property color foreground: root.barForeground
@@ -36,6 +36,8 @@ Panel {
 
   property int cursorIndex: 0
   property bool creating: false     // "new vault" form visible
+  property bool importing: false    // "import vault" form visible
+  property bool importNameEdited: false
 
   function toneColor(tone) {
     return tone === "urgent" ? Color.urgent : tone === "accent" ? Color.accent : root.dim
@@ -60,6 +62,7 @@ Panel {
 
   function newVault() {
     if (!root.host.configured || !root.host.repo.cloned) return
+    importing = false
     creating = true
     Qt.callLater(function() { nameField.text = ""; nameField.forceActiveFocus() })
   }
@@ -70,6 +73,37 @@ Panel {
     creating = false
     keyCatcher.forceActiveFocus()
     if (save) root.host.createVault(name)
+  }
+
+  function folderName(path) {
+    var parts = String(path).trim().replace(/\/+$/, "").split("/")
+    return parts.length ? parts[parts.length - 1] : ""
+  }
+
+  function importVault() {
+    if (!root.host.configured || !root.host.repo.cloned) return
+    creating = false
+    importing = true
+    importNameEdited = false
+    root.host.loadCandidates()
+    Qt.callLater(function() { sourceField.text = ""; importNameField.text = ""; sourceField.forceActiveFocus() })
+  }
+
+  function pickCandidate(candidate) {
+    sourceField.text = candidate.path
+    importNameEdited = false
+    importNameField.text = candidate.name
+    importNameField.forceActiveFocus()
+    importNameField.selectAll()
+  }
+
+  function finishImport(save) {
+    var source = sourceField.text.trim()
+    var name = importNameField.text.trim() || folderName(source)
+    if (save && (source === "" || name === "")) return
+    importing = false
+    keyCatcher.forceActiveFocus()
+    if (save) root.host.importVault(source, name)
   }
 
   function moveCursor(dy) {
@@ -84,6 +118,7 @@ Panel {
     } else {
       if (hostWidget) hostWidget.restartVault = ""
       creating = false
+      importing = false
       setup.editing = false
     }
   }
@@ -107,6 +142,7 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       blocked: urlField.activeFocus || pathField.activeFocus || nameField.activeFocus
+        || sourceField.activeFocus || importNameField.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onMoveRequested: function(dx, dy) { root.moveCursor(dy) }
@@ -120,6 +156,7 @@ Panel {
         else if (text === "r") root.host.fetch(0)
         else if (text === ",") root.editSettings()
         else if (text === "n") root.newVault()
+        else if (text === "i") root.importVault()
       }
 
       ScrollView {
@@ -159,6 +196,14 @@ Panel {
                   fontFamily: root.fontFamily
                   enabled: !root.host.busy
                   onClicked: root.newVault()
+                }
+                PanelActionButton {
+                  iconText: "󰋺"
+                  tooltipText: "Import an existing vault (i)"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  enabled: !root.host.busy
+                  onClicked: root.importVault()
                 }
                 PanelActionButton {
                   iconText: "󰭽"
@@ -358,6 +403,128 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onClicked: root.finishCreate(false)
+              }
+            }
+          }
+
+          // ---- import vault form
+          Column {
+            visible: root.importing
+            width: parent.width
+            spacing: Style.space(8)
+
+            PanelSectionHeader { text: "Import vault"; foreground: root.foreground; fontFamily: root.fontFamily }
+
+            Text {
+              visible: root.host.candidates.length > 0
+              width: parent.width
+              text: "Vaults Obsidian knows about outside this repo:"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Repeater {
+              model: root.host.candidates
+              CursorSurface {
+                id: candidateRow
+                required property var modelData
+                readonly property bool duplicate: !!modelData.duplicateOf
+                width: parent.width
+                foreground: root.foreground
+                hasCursor: !duplicate && candidateMouse.containsMouse
+                current: sourceField.text.trim() === modelData.path
+                opacity: duplicate ? 0.55 : 1
+                implicitHeight: candidateText.implicitHeight + Style.spacing.rowPaddingX
+
+                MouseArea {
+                  id: candidateMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  enabled: !candidateRow.duplicate
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.pickCandidate(candidateRow.modelData)
+                }
+
+                ColumnLayout {
+                  id: candidateText
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(10)
+                  spacing: Style.space(1)
+                  Text {
+                    Layout.fillWidth: true
+                    textFormat: Text.PlainText
+                    text: candidateRow.modelData.name
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideRight
+                  }
+                  Text {
+                    Layout.fillWidth: true
+                    textFormat: Text.PlainText
+                    text: candidateRow.duplicate
+                      ? "Already in this repo (another clone at " + candidateRow.modelData.duplicateOf + ")"
+                      : Model.plural(candidateRow.modelData.files, "file", "files") + " · " + Model.size(candidateRow.modelData.sizeKB) + " · " + candidateRow.modelData.path
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideMiddle
+                  }
+                }
+              }
+            }
+
+            TextField {
+              id: sourceField
+              width: parent.width
+              placeholderText: "Folder to import, e.g. ~/Notes/Work"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              KeyNavigation.tab: importNameField
+              onTextChanged: if (!root.importNameEdited) importNameField.text = root.folderName(text)
+              onAccepted: root.finishImport(true)
+              Keys.onEscapePressed: function(event) { root.finishImport(false); event.accepted = true }
+            }
+            TextField {
+              id: importNameField
+              width: parent.width
+              placeholderText: "Vault name"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              KeyNavigation.tab: sourceField
+              onTextEdited: root.importNameEdited = true
+              onAccepted: root.finishImport(true)
+              Keys.onEscapePressed: function(event) { root.finishImport(false); event.accepted = true }
+            }
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "Copies the folder into the repo as \"" + (importNameField.text.trim() || "…") + "\" (the original stays where it is), pushes it, and opens the copy in Obsidian."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            Row {
+              spacing: Style.space(8)
+              Button {
+                text: "Import"
+                iconText: "󰋺"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                enabled: !root.host.busy && sourceField.text.trim() !== "" && importNameField.text.trim() !== ""
+                onClicked: root.finishImport(true)
+              }
+              Button {
+                text: "Cancel"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.finishImport(false)
               }
             }
           }

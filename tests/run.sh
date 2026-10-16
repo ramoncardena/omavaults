@@ -121,6 +121,41 @@ check "create offline says not pushed" grep -q "not pushed" <<<"$out"
 check "offline vault committed locally" test -n "$(git -C "$T/local" log --oneline -1 -- Offline)"
 git -C "$T/local" remote set-url origin "$T/remote.git"
 
+# Importing existing vaults.
+SRC="$T/outside/Old Notes"
+mkdir -p "$SRC/.obsidian/plugins/x" "$SRC/.git" "$SRC/.trash" "$SRC/sub"
+echo note >"$SRC/a.md"; echo deep >"$SRC/sub/b.md"; echo '{}' >"$SRC/.obsidian/plugins/x/data.json"
+echo '{"w":1}' >"$SRC/.obsidian/workspace.json"; echo junk >"$SRC/.git/HEAD"; echo gone >"$SRC/.trash/c.md"
+before=$(find "$SRC" -type f -print0 | sort -z | xargs -0 md5sum)
+check "import vault" "$HELPER" import "$T/local" "$SRC" >/dev/null
+check "import keeps the folder name" test -f "$T/local/Old Notes/sub/b.md"
+check "import copies plugin config" test -f "$T/local/Old Notes/.obsidian/plugins/x/data.json"
+check "import skips .git" test ! -e "$T/local/Old Notes/.git"
+check "import skips workspace and trash" test ! -e "$T/local/Old Notes/.obsidian/workspace.json" -a ! -e "$T/local/Old Notes/.trash"
+check "import adds .gitignore" test -f "$T/local/Old Notes/.gitignore"
+check "import leaves source untouched" test "$before" = "$(find "$SRC" -type f -print0 | sort -z | xargs -0 md5sum)"
+check "imported vault is synced" test "$(state_of "Old Notes")" = synced
+(cd "$T/other" && git pull -q)
+check "imported vault reached remote" test -f "$T/other/Old Notes/a.md"
+check "import with custom name" "$HELPER" import "$T/local" "$SRC" "Archive" >/dev/null
+check "custom name used" test -f "$T/local/Archive/a.md"
+check "import refuses existing name" bash -c "! '$HELPER' import '$T/local' '$SRC' >/dev/null"
+check "import refuses missing folder" bash -c "! '$HELPER' import '$T/local' '$T/nope' >/dev/null"
+check "import refuses folder inside repo" bash -c "! '$HELPER' import '$T/local' '$T/local/Work' New >/dev/null"
+check "import refuses folder containing repo" bash -c "! '$HELPER' import '$T/local' '$T' New >/dev/null"
+mkdir -p "$T/outside/Huge"; truncate -s 96M "$T/outside/Huge/video.mp4"
+check "import refuses files over the host limit" bash -c "! '$HELPER' import '$T/local' '$T/outside/Huge' >/dev/null"
+check "refused import leaves nothing behind" test ! -e "$T/local/Huge"
+
+# Import candidates: Obsidian vaults outside the repo, duplicates flagged.
+git clone -q "$T/remote.git" "$T/oldclone"
+jq --arg a "$SRC" --arg b "$T/oldclone/Work" --arg c "$T/local/Work" \
+  '.vaults += {c1: {path: $a}, c2: {path: $b}, c3: {path: $c}}' "$OBS" >"$T/obs.tmp" && mv "$T/obs.tmp" "$OBS"
+cands=$("$HELPER" candidates "$T/local")
+check "candidates list outside vaults" test "$(jq -r --arg a "$SRC" '.candidates[] | select(.path == $a) | .duplicateOf' <<<"$cands")" = null
+check "candidates flag other clones" test "$(jq -r --arg b "$T/oldclone/Work" '.candidates[] | select(.path == $b) | .duplicateOf' <<<"$cands")" = "$T/oldclone"
+check "candidates skip repo vaults" test -z "$(jq -r --arg c "$T/local/Work" '.candidates[] | select(.path == $c) | .path' <<<"$cands")"
+
 # Settings copy outside shell.json.
 CFG="$XDG_CONFIG_HOME/omavaults/config.json"
 check "config-save writes file" "$HELPER" config-save "https://example.com/v.git" "~/Vaults" 120 >/dev/null

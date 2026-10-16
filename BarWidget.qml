@@ -39,12 +39,13 @@ BarWidget {
   property var repo: ({ cloned: false, vaults: [] })
   readonly property var vaults: repo && repo.vaults ? repo.vaults : []
   property bool loaded: false
-  property string busyAction: ""    // "", "clone", "fetch", "sync", "create", "open"
+  property string busyAction: ""    // "", "clone", "fetch", "sync", "create", "import", "open"
   property string busyVault: ""     // vault being acted on; "" means all
   property string statusMessage: ""
   property string errorMessage: ""
   property string restartVault: ""  // vault waiting for an "Obsidian must restart" confirmation
   property double now: Date.now()
+  property var candidates: []       // Obsidian vaults outside the repo, for import
 
   readonly property bool configured: repoUrl !== ""
   readonly property bool busy: busyAction !== ""
@@ -89,6 +90,15 @@ BarWidget {
   function createVault(name) {
     var trimmed = String(name).trim()
     run("create", trimmed, ["create", localPath, trimmed], "Creating " + trimmed + "…")
+  }
+  function importVault(source, name) {
+    var trimmed = String(name).trim()
+    run("import", trimmed, ["import", localPath, String(source).trim(), trimmed], "Importing " + trimmed + "…")
+  }
+  function loadCandidates() {
+    if (!configured || !repo.cloned || candidatesProc.running) return
+    candidatesProc.command = [helperPath, "candidates", localPath]
+    candidatesProc.running = true
   }
   function openVault(name) { restartVault = ""; run("open", name, ["open", localPath, name], "Opening " + name + "…") }
   function restartAndOpen(name) { restartVault = ""; run("open", name, ["open", "--restart", localPath, name], "Restarting Obsidian to add " + name + "…") }
@@ -170,6 +180,17 @@ BarWidget {
   }
 
   Process {
+    id: candidatesProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var result = root.parse(text)
+        root.candidates = result && result.ok ? result.candidates : []
+      }
+    }
+  }
+
+  Process {
     id: actionProc
     stdout: StdioCollector { id: actionOut; waitForEnd: true }
     onExited: function(exitCode) {
@@ -181,7 +202,7 @@ BarWidget {
       if (exitCode === 0 && result && result.ok) {
         root.statusMessage = action === "fetch" ? "" : (result.message || "")
         if (action === "open") root.close()
-        if (action === "create") Qt.callLater(function() { root.openVault(vault) })
+        if (action === "create" || action === "import") Qt.callLater(function() { root.openVault(vault) })
       } else if (result && result.needsRestart) {
         root.statusMessage = ""
         root.restartVault = result.vault

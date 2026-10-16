@@ -20,6 +20,12 @@ function plural(n, one, many) {
   return n + " " + (n === 1 ? one : many)
 }
 
+function size(kb) {
+  if (kb < 1024) return Math.max(1, Math.round(kb)) + " KB"
+  if (kb < 1024 * 1024) return (kb / 1024).toFixed(kb < 10240 ? 1 : 0) + " MB"
+  return (kb / 1024 / 1024).toFixed(1) + " GB"
+}
+
 function stateText(v) {
   switch (v.state) {
     case "synced": return "Up to date"
