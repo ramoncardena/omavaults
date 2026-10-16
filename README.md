@@ -138,6 +138,10 @@ click **Keep it public**; that choice is remembered per repository URL in
 `~/.config/omavaults/config.json`, and the warning returns for any other public
 repository. Other hosts and local paths aren't checked.
 
+<p align="center">
+  <img src="docs/screenshots/public-warning.png" alt="omaVaults panel with a red warning that the repository is public on GitHub, a Keep it public button, and the vault list below" width="480">
+</p>
+
 ### Notes edited on two devices
 
 When the same note changed here and on another device, the sync still
@@ -147,6 +151,10 @@ finishes, and nothing is lost:
 Projects/Index.md                                   ← the version from the remote
 Projects/Index (conflict laptop 2026-10-16 1409).md ← your version, from this device
 ```
+
+<p align="center">
+  <img src="docs/screenshots/conflict-copies.png" alt="omaVaults panel where the Projects vault shows 1 conflict copy to merge, next to vaults that are up to date, have updates available, or have a commit to push" width="480">
+</p>
 
 - The copy is committed and pushed, so every device sees it. The vault shows
   *conflict copies to merge*, the bar icon flags it, and a notification names
