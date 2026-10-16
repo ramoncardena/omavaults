@@ -13,7 +13,8 @@ DEST="$HOME/.config/omarchy/plugins/$ID"
 
 omarchy-plugin-validate "$SRC"
 mkdir -p "$DEST"
-cp -r "$SRC/manifest.json" "$SRC/OmaVaults.qml" "$SRC/bin" "$DEST/"
+rm -f "$DEST/OmaVaults.qml"   # pre-0.2 single-file layout
+cp -r "$SRC/manifest.json" "$SRC/BarWidget.qml" "$SRC/Panel.qml" "$SRC/Model.js" "$SRC/bin" "$SRC/README.md" "$SRC/LICENSE" "$DEST/"
 
 if ! jq -e --arg id "$ID" '[.bar.layout[][]?.id] | index($id)' "$HOME/.config/omarchy/shell.json" >/dev/null 2>&1; then
   omarchy-shell shell rescanPlugins >/dev/null

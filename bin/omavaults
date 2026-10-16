@@ -8,7 +8,8 @@
 #
 #   omavaults status <dir>               repo + per-vault sync state
 #   omavaults clone  <url> <dir>         clone the vaults repo
-#   omavaults fetch  <dir>               refresh remote-tracking refs
+#   omavaults fetch  <dir> [--max-age N] refresh remote-tracking refs; skip if the
+#                                        last fetch is under N seconds old
 #   omavaults sync   <dir> [vault]       commit, pull --rebase, push
 #   omavaults create <dir> <name>        new vault folder, committed and pushed
 #   omavaults open   [--restart] <dir> <vault>
@@ -171,9 +172,19 @@ do_fetch() {
 }
 
 cmd_fetch() {
-  local dir
+  local dir gitdir max_age=0
   expand_dir "${1:-}"
+  [[ ${2:-} == --max-age ]] && max_age="${3:-0}"
+  [[ $max_age =~ ^[0-9]+$ ]] || fail "--max-age must be a number of seconds"
   in_repo "$dir" || fail "not cloned yet"
+  # Several bar instances (one per monitor) share one schedule; only the first
+  # one in each window actually goes to the network.
+  if (( max_age > 0 )); then
+    gitdir=$(git -C "$dir" rev-parse --absolute-git-dir)
+    if [[ -f $gitdir/FETCH_HEAD ]] && (( $(date +%s) - $(stat -c %Y "$gitdir/FETCH_HEAD") < max_age )); then
+      ok "Fetched recently"
+    fi
+  fi
   with_lock "$dir" do_fetch "$dir"
 }
 

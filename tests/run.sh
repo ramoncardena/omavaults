@@ -76,6 +76,11 @@ check "no conflict markers" bash -c "! grep -q '<<<<<<<' '$T/local/Work/todo.md'
 check "other vault's edits kept" grep -q "keep me" "$T/local/Personal/journal.md"
 check "conflict -> diverged" test "$(state_of Work)" = diverged
 
+touch "$T/local/.git/FETCH_HEAD"
+check "fetch --max-age skips a recent fetch" test "$("$HELPER" fetch "$T/local" --max-age 300 | jq -r .message)" = "Fetched recently"
+touch -d '10 minutes ago' "$T/local/.git/FETCH_HEAD"
+check "fetch --max-age fetches when stale" test "$("$HELPER" fetch "$T/local" --max-age 300 | jq -r .message)" = "Fetched"
+check "fetch --max-age rejects junk" bash -c "! '$HELPER' fetch '$T/local' --max-age soon >/dev/null"
 check "rejects path traversal" bash -c "! '$HELPER' sync '$T/local' ../x >/dev/null"
 check "rejects bad open name" bash -c "! '$HELPER' open '$T/local' ../etc >/dev/null"
 

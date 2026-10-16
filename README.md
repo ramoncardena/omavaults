@@ -4,7 +4,24 @@ An Omarchy bar widget for Obsidian vaults kept in a git repository. One repo
 holds many vaults (each top-level folder is a vault); the panel shows every
 vault's sync state, syncs on demand, and opens a vault in Obsidian on click.
 
-## Install (development)
+## Requirements
+
+- Omarchy 4 (Quattro) with its bundled Quickshell plugin host
+- `git`, `jq`, `flock` and `setsid` (util-linux), `pgrep` (procps),
+  `xdg-open`, and `omarchy-notification-send`; all ship with Omarchy
+- [Obsidian](https://obsidian.md) installed with the `obsidian://` URI handler
+- Non-interactive git access to your vaults repo (see *Authentication*)
+
+No root privileges, packages, services, or installers are needed.
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/ramoncardena/omavaults.git --enable
+```
+
+For local development, copy the working tree into the plugins folder (the
+shell rejects symlinks) and enable it:
 
 ```bash
 scripts/dev-install.sh
@@ -22,9 +39,16 @@ Settings live in the widget's entry in `~/.config/omarchy/shell.json`:
   "refreshIntervalSec": 300 }
 ```
 
-Authentication is whatever git already uses (SSH agent or a credential
-helper). The widget never prompts: SSH runs in `BatchMode`, so set up keys
-first.
+### Authentication
+
+The widget can't show a prompt, so git must authenticate on its own. SSH runs
+in `BatchMode`, and HTTPS has terminal prompts disabled:
+
+- **HTTPS**: works with any git credential helper, e.g. after
+  `gh auth setup-git`.
+- **SSH**: the key must be usable without typing a passphrase, either loaded
+  into an agent or unencrypted. If the shell has no `SSH_AUTH_SOCK`, the
+  helper falls back to systemd's `$XDG_RUNTIME_DIR/ssh-agent.socket`.
 
 ## Use
 
@@ -32,10 +56,11 @@ first.
 |---|---|---|
 | Open vault in Obsidian | click a row | `↑`/`↓`, `Enter` |
 | Sync one vault | row's sync button | `s` |
-| Sync all vaults | **Sync all** / right-click bar icon | `S` |
-| Fetch remote status | refresh button | `r` |
+| Sync all vaults | ⟳ in the header / right-click bar icon | `S` |
+| Fetch remote status | cloud button in the header | `r` |
 | Create a vault | `+` button | `n`, type a name, `Enter` |
 | Repository settings | ⚙ button | `,` |
+| Close panel | click outside | `Esc` |
 
 The bar icon highlights when any vault is out of sync.
 
@@ -66,7 +91,17 @@ and the working tree is left clean (no conflict markers). Resolve with
 `git pull --rebase` in the repo. Nothing is ever force-pushed.
 
 Status refreshes locally every minute and fetches from the remote every
-`refreshIntervalSec`.
+`refreshIntervalSec`. The bar runs one widget per monitor; they share a single
+fetch per interval, and finished actions refresh every screen.
+
+### IPC
+
+```bash
+omarchy-shell io.github.ramoncardena.omavaults toggle   # also open/close/show/hide
+omarchy-shell io.github.ramoncardena.omavaults syncAll  # e.g. from a Hyprland bind
+omarchy-shell io.github.ramoncardena.omavaults fetch
+omarchy-shell io.github.ramoncardena.omavaults refresh
+```
 
 ### Obsidian integration
 
@@ -82,19 +117,52 @@ So omaVaults:
 Tip: add `.obsidian/workspace*.json` to the repo's `.gitignore`, or every
 vault will look modified whenever you open it.
 
-## Layout
+## Safety and privacy
+
+Like every Omarchy plugin, omaVaults runs unsandboxed as your user. Inspect
+the source before installing. What it does:
+
+- **Network**: only `git clone`/`fetch`/`push` to the repository you
+  configure. No telemetry and no other requests.
+- **Writes**: the configured local folder (your vaults repo) and new vault
+  folders inside it; `~/.config/obsidian/obsidian.json`, where vault entries
+  are added in Obsidian's own format and only while Obsidian is not running;
+  its own widget entry in `~/.config/omarchy/shell.json` when you save
+  settings.
+- **Git**: commits with your configured git identity. It never force-pushes
+  or rewrites published history; a conflicting rebase is aborted.
+- **Processes**: launches Obsidian through `xdg-open`. It quits Obsidian
+  (`SIGTERM`, a normal shutdown) only after you confirm the restart prompt.
+- No root, no services, no background daemons beyond the shell itself.
+
+## Remove
+
+```bash
+omarchy plugin remove io.github.ramoncardena.omavaults --yes
+```
+
+Removing the plugin leaves your vaults folder and the `obsidian.json` entries
+in place. Remove those yourself if you no longer want them. Disabling the
+widget drops its `shell.json` entry, so note your repository URL first if you
+plan to re-enable it later.
+
+## Development
 
 ```
 manifest.json      Omarchy plugin manifest (bar-widget)
-OmaVaults.qml      bar icon + popup panel (Quickshell, Omarchy UI kit)
+BarWidget.qml      entry point: state, helper processes, IPC, bar icon
+Panel.qml          the popup (loaded by BarWidget.qml)
+Model.js           pure presentation helpers
 bin/omavaults      git/Obsidian helper; every command prints JSON
 tests/run.sh       end-to-end helper tests on throwaway repos
 ```
 
-## Test
-
 ```bash
 tests/run.sh
+omarchy plugin validate .
+# qs.* imports resolve from a root containing `qs` -> $OMARCHY_PATH/shell
+mkdir -p /tmp/qslint && ln -sfn "${OMARCHY_PATH:-/usr/share/omarchy}/shell" /tmp/qslint/qs
+qmllint -I /tmp/qslint BarWidget.qml Panel.qml
 ```
 
 ## License
