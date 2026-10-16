@@ -11,7 +11,7 @@ vault's sync state, syncs on demand, and opens a vault in Obsidian on click.
 ## Requirements
 
 - Omarchy 4 (Quattro) with its bundled Quickshell plugin host
-- `git`, `jq`, `rsync`, `flock` and `setsid` (util-linux), `pgrep` (procps),
+- `git`, `jq`, `rsync`, `curl`, `flock` and `setsid` (util-linux), `pgrep` (procps),
   `xdg-open`, and `omarchy-notification-send`; all ship with Omarchy
 - [Obsidian](https://obsidian.md) installed with the `obsidian://` URI handler
 - For **Browse**: the XDG desktop portal plus `python-gobject` (both ship
@@ -128,6 +128,16 @@ the copy.
 all) → `fetch` → `rebase --autostash` onto upstream → `push`. Nothing is ever
 force-pushed, and published history is never rewritten.
 
+### Public repositories
+
+If the repository is public on GitHub, GitLab, or Codeberg, the panel shows a
+warning: anyone on the internet can read every note you sync. It also appears
+before you clone, so you see it while setting up. Private is strongly
+recommended. If the repository is meant to be public (a digital garden, say),
+click **Keep it public**; that choice is remembered per repository URL in
+`~/.config/omavaults/config.json`, and the warning returns for any other public
+repository. Other hosts and local paths aren't checked.
+
 ### Notes edited on two devices
 
 When the same note changed here and on another device, the sync still
@@ -187,7 +197,13 @@ vault will look modified whenever you open it.
 Like every Omarchy plugin, omaVaults runs unsandboxed as your user. Inspect
 the source before installing. What it does:
 
-- **Network**: only `git clone`/`fetch`/`push` to the repository you
+- **Network (visibility check)**: one anonymous request to the host's API
+  (`api.github.com/repos/<owner>/<repo>`, or the GitLab/Codeberg equivalent)
+  when the shell starts and when the repository URL changes, to warn you if
+  the repository is public. It sends no credentials, follows no redirects,
+  reads only the status code, and is cached for an hour in
+  `~/.cache/omavaults/visibility.json`.
+- **Network (git)**: only `git clone`/`fetch`/`push` to the repository you
   configure. No telemetry and no other requests.
 - **Reads**: folders you choose to import (copied, never modified), and the
   vault list in `~/.config/obsidian/obsidian.json`.

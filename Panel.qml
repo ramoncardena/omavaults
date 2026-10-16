@@ -27,7 +27,8 @@ Panel {
     repoUrl: "", localPath: "", repo: { cloned: false, vaults: [] }, vaults: [],
     loaded: false, busy: false, busyAction: "", busyVault: "", statusMessage: "",
     errorMessage: "", restartVault: "", configured: false, hasConflict: false,
-    attentionCount: 0, summary: "", now: 0, candidates: [], picking: false, pickedFolder: ""
+    attentionCount: 0, summary: "", now: 0, candidates: [], picking: false, pickedFolder: "",
+    publicWarning: false, repoHost: ""
   })
 
   readonly property color foreground: root.barForeground
@@ -257,6 +258,39 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
+          }
+
+          // ---- warning: the repository is readable by anyone
+          CursorSurface {
+            visible: root.host.publicWarning
+            width: parent.width
+            bordered: true
+            foreground: Color.urgent
+            implicitHeight: publicColumn.implicitHeight + Style.spacing.rowPaddingX * 2
+
+            Column {
+              id: publicColumn
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.margins: Style.space(10)
+              spacing: Style.space(8)
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "󰀦  This repository is public" + (root.host.repoHost ? " on " + Model.hostName(root.host.repoHost) : "")
+                  + ": anyone on the internet can read every note you sync. Make it private in the repository's settings unless that's intended."
+                color: Color.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              FormActions {
+                acceptText: "Keep it public"
+                showCancel: false
+                onAccepted: root.hostWidget.acknowledgePublic()
+              }
+            }
           }
 
           // ---- confirm: Obsidian only learns about new vaults at startup

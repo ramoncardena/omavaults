@@ -16,6 +16,7 @@
 #                                        copy an existing vault in, commit and push
 #   omavaults candidates <dir>           Obsidian vaults outside the repo
 #   omavaults pick-folder [start]        native folder chooser; prints the choice
+#   omavaults visibility <url>           public / private / unknown (anonymous API check)
 #   omavaults config-save <url> <dir> [interval]
 #                                        persist settings outside shell.json
 #   omavaults open   [--restart] <dir> <vault>
@@ -543,21 +544,78 @@ cmd_pick_folder() {
   jq -cn --arg path "$path" '{ok: true, path: $path}'
 }
 
+# Updates the plugin's own settings file, keeping keys it isn't told about.
+#   config-save <url> <dir> [interval]   repository settings
+#   config-save --ack-public <url>       "this public repo is meant to be public"
 cmd_config_save() {
-  local url="${1:-}" path="${2:-}" interval="${3:-300}" tmp
-  [[ -n $url ]] || fail "no repository URL given"
-  [[ -n $path ]] || fail "no local path given"
-  [[ $interval =~ ^[0-9]+$ ]] || fail "interval must be a number of seconds"
+  local filter tmp current='{}'
+  [[ -s $OMAVAULTS_CONFIG ]] && current=$(jq -c 'if type == "object" then . else {} end' "$OMAVAULTS_CONFIG" 2>/dev/null || echo '{}')
+  if [[ ${1:-} == --ack-public ]]; then
+    [[ -n ${2:-} ]] || fail "no repository URL given"
+    filter=$(jq -cn --arg url "$2" '{publicAcknowledged: $url}')
+  else
+    local url="${1:-}" path="${2:-}" interval="${3:-300}"
+    [[ -n $url ]] || fail "no repository URL given"
+    [[ -n $path ]] || fail "no local path given"
+    [[ $interval =~ ^[0-9]+$ ]] || fail "interval must be a number of seconds"
+    filter=$(jq -cn --arg url "$url" --arg path "$path" --argjson interval "$interval" \
+      '{repoUrl: $url, localPath: $path, refreshIntervalSec: $interval}')
+  fi
   mkdir -p "$(dirname "$OMAVAULTS_CONFIG")" || fail "cannot create $(dirname "$OMAVAULTS_CONFIG")"
   tmp=$(mktemp "$OMAVAULTS_CONFIG.XXXXXX") || fail "cannot write $OMAVAULTS_CONFIG"
-  if jq -n --arg url "$url" --arg path "$path" --argjson interval "$interval" \
-      '{repoUrl: $url, localPath: $path, refreshIntervalSec: $interval}' >"$tmp"; then
+  if jq -n --argjson cur "$current" --argjson set "$filter" '$cur + $set' >"$tmp"; then
     mv "$tmp" "$OMAVAULTS_CONFIG"
   else
     rm -f "$tmp"
     fail "cannot write $OMAVAULTS_CONFIG"
   fi
   ok "Saved"
+}
+
+# Is the repository readable by anyone? One anonymous request to the host's
+# API (no credentials, no redirects, only the status code is read), cached for
+# an hour so per-monitor widget instances don't repeat it.
+VISIBILITY_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/omavaults/visibility.json"
+
+cmd_visibility() {
+  local url="${1:-}" slug host repo api code visibility="unknown" now cache='{}' cached
+  [[ -n $url ]] || fail "no repository URL given"
+  slug=$(remote_slug "$url")
+  host="${slug%%/*}"; repo="${slug#*/}"
+  now=$(date +%s)
+  [[ -s $VISIBILITY_CACHE ]] && cache=$(jq -c 'if type == "object" then . else {} end' "$VISIBILITY_CACHE" 2>/dev/null || echo '{}')
+  cached=$(jq -c --arg s "$slug" --argjson now "$now" '.[$s] | select(. != null and ($now - .at) < 3600)' <<<"$cache")
+  if [[ -n $cached ]]; then
+    jq -cn --argjson c "$cached" --arg host "$host" '{ok: true, visibility: $c.visibility, host: $host, cached: true}'
+    return
+  fi
+
+  # Only "owner/repo" shaped paths on hosts with a public API are checked.
+  if [[ $repo =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    case "$host" in
+      github.com) api="https://api.github.com/repos/$repo" ;;
+      gitlab.com) api="https://gitlab.com/api/v4/projects/$(jq -rn --arg r "$repo" '$r | @uri')" ;;
+      codeberg.org) api="https://codeberg.org/api/v1/repos/$repo" ;;
+    esac
+  fi
+  if [[ -n ${api:-} ]] && command -v curl >/dev/null; then
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 --max-redirs 0 \
+      -H 'User-Agent: omaVaults' -H 'Accept: application/json' "$api" 2>/dev/null)
+    case "$code" in
+      200) visibility="public" ;;
+      404|401|403) visibility="private" ;;   # private, or not visible anonymously
+    esac
+  fi
+
+  # Cache definite answers only, so a network blip is retried next time.
+  if [[ $visibility != unknown ]]; then
+    mkdir -p "$(dirname "$VISIBILITY_CACHE")"
+    local tmp
+    tmp=$(mktemp "$VISIBILITY_CACHE.XXXXXX") && \
+      jq -n --argjson cur "$cache" --arg s "$slug" --arg v "$visibility" --argjson now "$now" \
+        '$cur + {($s): {visibility: $v, at: $now}}' >"$tmp" && mv "$tmp" "$VISIBILITY_CACHE" || rm -f "$tmp"
+  fi
+  jq -cn --arg v "$visibility" --arg host "$host" '{ok: true, visibility: $v, host: $host}'
 }
 
 cmd_sync() {
@@ -673,6 +731,7 @@ case "${1:-}" in
   candidates) shift; cmd_candidates "$@" ;;
   pick-folder) shift; cmd_pick_folder "$@" ;;
   config-save) shift; cmd_config_save "$@" ;;
+  visibility) shift; cmd_visibility "$@" ;;
   open) shift; cmd_open "$@" ;;
-  *) fail "usage: omavaults {status|clone|fetch|sync|create|import|candidates|pick-folder|open|config-save} ..." ;;
+  *) fail "usage: omavaults {status|clone|fetch|sync|create|import|candidates|pick-folder|open|config-save|visibility} ..." ;;
 esac

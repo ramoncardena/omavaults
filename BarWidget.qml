@@ -46,6 +46,10 @@ BarWidget {
   property string restartVault: ""  // vault waiting for an "Obsidian must restart" confirmation
   property double now: Date.now()
   property var candidates: []       // Obsidian vaults outside the repo, for import
+  property string repoVisibility: "" // "public" | "private" | "unknown" | "" (not checked)
+  property string repoHost: ""
+  readonly property bool publicWarning: configured && repoVisibility === "public"
+    && String(savedConfig.publicAcknowledged || "") !== repoUrl
   property bool picking: false      // folder chooser open; the panel is hidden meanwhile
   property string pickedFolder: ""  // chooser result, consumed by the panel on reopen
 
@@ -107,6 +111,20 @@ BarWidget {
     pickProc.running = true
     close()
   }
+  // Anonymous API check; the helper caches it, so this is cheap to repeat.
+  function checkVisibility() {
+    repoVisibility = ""
+    if (!configured || visibilityProc.running) return
+    visibilityProc.command = [helperPath, "visibility", repoUrl]
+    visibilityProc.running = true
+  }
+  function acknowledgePublic() {
+    var next = {}
+    for (var k in savedConfig) next[k] = savedConfig[k]
+    next.publicAcknowledged = repoUrl
+    savedConfig = next   // hide the banner now; the file write follows
+    Quickshell.execDetached([helperPath, "config-save", "--ack-public", repoUrl])
+  }
   function loadCandidates() {
     if (!configured || !repo.cloned || candidatesProc.running) return
     candidatesProc.command = [helperPath, "candidates", localPath]
@@ -146,9 +164,16 @@ BarWidget {
     return true
   }
 
-  Component.onCompleted: refresh()
-  onRepoUrlChanged: { refresh(); persistConfig(repoUrl, localPath) }
-  onLocalPathChanged: { refresh(); persistConfig(repoUrl, localPath) }
+  // Settings change handlers run before derived bindings (like `configured`)
+  // re-evaluate, so act on the next turn of the event loop.
+  function applySettings() {
+    refresh()
+    persistConfig(repoUrl, localPath)
+    checkVisibility()
+  }
+  Component.onCompleted: Qt.callLater(applySettings)
+  onRepoUrlChanged: Qt.callLater(applySettings)
+  onLocalPathChanged: Qt.callLater(applySettings)
   onSavedConfigLoadedChanged: persistConfig(repoUrl, localPath)
 
   FileView {
@@ -200,6 +225,18 @@ BarWidget {
       else if (result && !result.cancelled && result.error) root.errorMessage = result.error
       root.open()
       root.picking = false
+    }
+  }
+
+  Process {
+    id: visibilityProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var result = root.parse(text)
+        root.repoVisibility = result && result.ok ? result.visibility : "unknown"
+        root.repoHost = result && result.host ? result.host : ""
+      }
     }
   }
 

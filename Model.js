@@ -17,6 +17,15 @@ function stateGlyph(state) {
   }
 }
 
+function hostName(host) {
+  switch (host) {
+    case "github.com": return "GitHub"
+    case "gitlab.com": return "GitLab"
+    case "codeberg.org": return "Codeberg"
+    default: return host
+  }
+}
+
 function plural(n, one, many) {
   return n + " " + (n === 1 ? one : many)
 }

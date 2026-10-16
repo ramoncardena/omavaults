@@ -11,6 +11,7 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 
 export XDG_CONFIG_HOME="$T/config"
+export XDG_CACHE_HOME="$T/cache"
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com
 export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
 export GIT_CONFIG_GLOBAL="$T/gitconfig" GIT_CONFIG_NOSYSTEM=1
@@ -27,6 +28,12 @@ cat >"$T/stub/pgrep" <<EOF
 [[ -f "$T/running" ]] && echo \$\$
 exit 0
 EOF
+# curl answers with $FAKE_HTTP_CODE and logs each request; never the network.
+cat >"$T/stub/curl" <<STUB
+#!/bin/bash
+echo "\$*" >>"$T/curl.log"
+printf '%s' "\${FAKE_HTTP_CODE:-000}"
+STUB
 chmod +x "$T/stub/"*
 export PATH="$T/stub:$PATH"
 
@@ -220,6 +227,28 @@ check "config-save writes file" "$HELPER" config-save "https://example.com/v.git
 check "config-save content" test "$(jq -c . "$CFG")" = '{"repoUrl":"https://example.com/v.git","localPath":"~/Vaults","refreshIntervalSec":120}'
 check "config-save requires url" bash -c "! '$HELPER' config-save '' '~/Vaults' >/dev/null"
 check "config-save rejects bad interval" bash -c "! '$HELPER' config-save u p soon >/dev/null"
+
+# Public-repository warning.
+vis() { "$HELPER" visibility "$1" | jq -r .visibility; }
+check "public GitHub repo" test "$(FAKE_HTTP_CODE=200 vis https://github.com/a/public.git)" = public
+check "private GitHub repo" test "$(FAKE_HTTP_CODE=404 vis git@github.com:a/private.git)" = private
+check "GitLab is checked" test "$(FAKE_HTTP_CODE=200 vis https://gitlab.com/a/b.git)" = public
+check "Codeberg is checked" test "$(FAKE_HTTP_CODE=404 vis https://codeberg.org/a/b)" = private
+check "network failure is unknown" test "$(FAKE_HTTP_CODE=000 vis https://github.com/a/flaky.git)" = unknown
+check "other hosts are unknown" test "$(FAKE_HTTP_CODE=200 vis https://git.example.com/a/b.git)" = unknown
+check "local paths are unknown" test "$(FAKE_HTTP_CODE=200 vis "$T/remote.git")" = unknown
+n=$(wc -l <"$T/curl.log")
+check "answers are cached across spellings" test "$(FAKE_HTTP_CODE=404 vis https://github.com/a/public)" = public
+check "cached answer makes no request" test "$(wc -l <"$T/curl.log")" = "$n"
+check "unknown answers are not cached" test "$(FAKE_HTTP_CODE=200 vis https://github.com/a/flaky.git)" = public
+check "request carries no credentials" bash -c "! grep -qiE 'authorization|token|-u ' '$T/curl.log'"
+check "request does not follow redirects" grep -q -- "--max-redirs 0" "$T/curl.log"
+
+# Acknowledging a public repo is kept when settings are saved again.
+"$HELPER" config-save --ack-public "https://github.com/a/public.git" >/dev/null
+"$HELPER" config-save "https://github.com/a/public.git" "~/V" 300 >/dev/null
+check "settings save keeps the public acknowledgement" test "$(jq -r .publicAcknowledged "$CFG")" = "https://github.com/a/public.git"
+check "settings save updates the path" test "$(jq -r .localPath "$CFG")" = "~/V"
 
 echo
 echo "$pass passed, $failed failed"
