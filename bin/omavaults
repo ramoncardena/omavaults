@@ -35,6 +35,12 @@ set -uo pipefail
 export GIT_TERMINAL_PROMPT=0
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}"
 
+# Every pathspec here is a vault name or a path Git reported, never a pattern.
+# `--` only ends option parsing; without this a vault named `*` or a note named
+# `a[1].md` would glob-match other paths (see gitglossary, "pathspec").
+export GIT_LITERAL_PATHSPECS=1
+unset GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+
 # The bar is often started without SSH_AUTH_SOCK in its environment; fall back
 # to the systemd user agent socket so keys loaded there are usable.
 if [[ -z ${SSH_AUTH_SOCK:-} && -S ${XDG_RUNTIME_DIR:-/run/user/$UID}/ssh-agent.socket ]]; then

@@ -326,6 +326,15 @@ echo "local" >"$T/local/Work/sub/m.md"
 check "symlink guard rejects symlinked folders" bash -c "source <(sed -n '/^inside_repo_no_symlinks()/,/^}/p' '$HELPER'); mkdir -p '$T/g/real'; ln -sfn '$T/outside-target' '$T/g/link'; ! inside_repo_no_symlinks '$T/g' 'link/x.md' && inside_repo_no_symlinks '$T/g' 'real/x.md' && ! inside_repo_no_symlinks '$T/g' '../x.md'"
 "$HELPER" sync "$T/local" Work >/dev/null; (cd "$T/other" && git pull -q)
 
+# Vault names are literal paths, never Git pathspec patterns.
+mkdir -p "$T/local/*" && echo star >"$T/local/*/s.md"
+echo "dirty" >>"$T/local/Work/todo.md"
+"$HELPER" sync "$T/local" '*' >/dev/null
+check "a vault named * syncs only itself" test -n "$(git -C "$T/local" status --porcelain -- Work/todo.md)"
+check "a vault named * is committed" test -z "$(git -C "$T/local" status --porcelain --untracked-files=all -- '*/s.md')"
+check "status counts only the * vault" test "$("$HELPER" status "$T/local" | jq -r '.vaults[] | select(.name == "*") | .state')" = synced
+git -C "$T/local" checkout -q -- Work/todo.md
+
 echo
 echo "$pass passed, $failed failed"
 (( failed == 0 ))

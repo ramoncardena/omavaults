@@ -3,6 +3,14 @@
 All notable changes to omaVaults. Versions follow the `version` field in
 `manifest.json`; each release is tagged `v<version>`.
 
+## 0.5.3 — 2026-10-17
+
+### Security
+- Vault names and note paths are passed to git as literal paths. A vault named
+  `*` (or a note such as `a[1].md`) was treated as a git pathspec pattern, so a
+  single-vault sync could stage, commit and push changes from other vaults, and
+  status could count other vaults' changes.
+
 ## 0.5.2 — 2026-10-16
 
 ### Changed
